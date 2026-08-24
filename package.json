@@ -1,0 +1,62 @@
+{
+  "name": "dsh-composer-keys",
+  "version": "0.1.0",
+  "description": "为 DeepSeek Harness Web 的聊天输入框自定义发送与换行键位：Enter / Ctrl+Enter / Shift+Enter / 任意自定义组合键可自由分配给「发送」或「换行」，默认保持 DSH 原生行为；忙碌时的排队/转向语义仍由原生「繁忙时 Enter 键行为」设置决定。Customizable send & newline key bindings for the DeepSeek Harness web composer: assign Enter, Ctrl+Enter, Shift+Enter, or any custom chord to Send or Newline. Native behavior is preserved by default; busy queue-vs-steer stays owned by the native Busy-Enter setting.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "test",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/engine.test.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "composer",
+    "hotkeys",
+    "keybindings",
+    "enter",
+    "newline",
+    "send",
+    "快捷键",
+    "输入框",
+    "发送",
+    "换行"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zlqd123/dsh-composer-keys.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zlqd123/dsh-composer-keys/issues"
+  },
+  "homepage": "https://github.com/zlqd123/dsh-composer-keys#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}
