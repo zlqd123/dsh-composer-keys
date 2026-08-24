@@ -10,7 +10,7 @@
 
 中文 | [English below](#english)
 
-`dsh-composer-keys` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 前端的输入框按键自定义插件：把 **Enter、Ctrl/Cmd+Enter、Shift+Enter 或任意自定义组合键**（如 Ctrl+S、Alt+Enter）自由分配给「发送」或「换行」两个动作。
+`dsh-composer-keys` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 前端的输入框按键自定义插件：把 **Enter、Ctrl/Cmd+Enter、Shift+Enter 或任意自定义组合键**（如 Ctrl+S、Alt+Enter）自由分配给「发送」「换行」「打断」三个动作。
 
 **默认保持 DSH 原生行为**——装上插件后一切照旧，只有你主动改绑才会变化。
 
@@ -22,7 +22,8 @@
 
 ## 特性
 
-- **自由分配**：「发送」「换行」各自绑定任意一组组合键；同一按键不能同时属于两个动作（录制时自动迁移）。
+- **自由分配**：「发送」「换行」「打断」各自绑定任意一组组合键；同一按键不能同时属于多个动作（录制时自动迁移，优先级：发送 > 换行 > 打断）。
+- **任务打断**：「打断」中断当前打开会话正在运行的任务，等同于输入框的停止按钮——走同一条原生取消管线（含子代理地址路由）。任务运行时在页面**任意位置**生效；对话框/菜单打开、输入法组合中自动让路；空闲时按下不吞键、零副作用。默认无绑定。
 - **快速预设**：`DSH 原生`（Enter=发送 / Shift+Enter=换行 / Ctrl+Enter=加速提交）与 `微信风格`（Ctrl+Enter=发送 / Enter 或 Shift+Enter=换行）一键切换。
 - **两处入口**：Settings → General 的「输入框按键」一行；聊天输入框工具行右侧的小键盘按钮。两者打开同一个配置面板。
 - **持久化**：键位存入 DSH 用户设置文档的 `composer-keys` 命名空间——与主题、语言等原生偏好同一条通道，重启保留、跨设备跟随用户文档。
@@ -75,7 +76,7 @@ dsh plugin --profile web remove dsh-composer-keys
 ## 使用
 
 1. 打开 Settings → General 找到「输入框按键」行（或点击输入框右下角的小键盘图标），点「配置…」；
-2. 在「发送」或「换行」区块点「+ 录制按键」，然后按下想要的组合键（Esc 取消）；
+2. 在「发送」「换行」「打断」区块点「+ 录制按键」，然后按下想要的组合键（Esc 取消；**录制打断键时按 Esc 即绑定 Esc**，取消改为再点一次按钮）；
 3. 点击已录制的键位标签上的 × 可移除；清空「发送」的全部键位后只能通过发送按钮发送（面板会提示）；
 4. 底部预设一键回到「DSH 原生」或切换「微信风格」。
 
@@ -95,9 +96,10 @@ dsh plugin --profile web remove dsh-composer-keys
 <a id="english"></a>
 ## English
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web-composer plugin that assigns **any chord** — Enter, Ctrl/Cmd+Enter, Shift+Enter, or custom ones like Ctrl+S — to the **Send** or **Newline** actions. Ships with native behavior by default; nothing changes until you rebind.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web-composer plugin that assigns **any chord** — Enter, Ctrl/Cmd+Enter, Shift+Enter, or custom ones like Ctrl+S — to the **Send**, **Newline**, or **Interrupt** actions. Ships with native behavior by default; nothing changes until you rebind.
 
 - Two presets: **DSH native** and **Chat style** (Ctrl+Enter sends; Enter/Shift+Enter newline), plus free per-action recording with automatic cross-action migration.
+- **Interrupt** aborts the open session's running task through the same native cancel pipeline as the composer stop button (subagent-address routing included). Works anywhere on the page while a task runs; yields to dialogs/menus/IME; idle presses pass untouched. Unbound by default.
 - Bindings persist in the user-settings document (`composer-keys` namespace); two entries into one panel (Settings → General row + composer toolbar keyboard button).
 - While busy, queue-vs-steer follows the native "Busy Enter behavior" setting uniformly for every bound send key once bindings deviate from defaults.
 - Theme-aware styling via official DSW semantic tokens; zero-intervention while bindings stay pristine; synthetic replays are `isTrusted=false`; IME composition never intercepted.

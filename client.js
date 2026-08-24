@@ -149,15 +149,16 @@ function gestureMatchesBinding(gesture, binding) {
 
 /**
  * Resolve a gesture against the bindings. Send wins ties (the sanitizer never
- * stores one chord under both actions anyway).
- * @param {{send: string[], newline: string[]}} bindings
+ * stores one chord under both actions anyway); interrupt is lowest priority.
+ * @param {{send: string[], newline: string[], interrupt: string[]}} bindings
  * @param {string} gesture
- * @returns {'send' | 'newline' | undefined}
+ * @returns {'send' | 'newline' | 'interrupt' | undefined}
  */
 function actionForGesture(bindings, gesture) {
   if (bindings == null || typeof gesture !== 'string' || gesture === '') return undefined
   if (gestureMatchesList(bindings.send, gesture)) return 'send'
   if (gestureMatchesList(bindings.newline, gesture)) return 'newline'
+  if (gestureMatchesList(bindings.interrupt, gesture)) return 'interrupt'
   return undefined
 }
 
@@ -178,16 +179,18 @@ function isPristineDefaults(bindings, defaults) {
 }
 
 /**
- * Move one gesture to an action: removed from both lists first, then appended
- * to the target — the mutual-exclusion invariant lives here.
- * @returns {{send: string[], newline: string[]}}
+ * Move one gesture to an action: removed from all three lists first, then
+ * appended to the target — the mutual-exclusion invariant lives here.
+ * @returns {{send: string[], newline: string[], interrupt: string[]}}
  */
 function moveGesture(bindings, gesture, targetAction) {
   var send = withoutValue(Array.isArray(bindings.send) ? bindings.send : [], gesture)
   var newline = withoutValue(Array.isArray(bindings.newline) ? bindings.newline : [], gesture)
+  var interrupt = withoutValue(Array.isArray(bindings.interrupt) ? bindings.interrupt : [], gesture)
   if (targetAction === 'send') send.push(gesture)
+  else if (targetAction === 'interrupt') interrupt.push(gesture)
   else newline.push(gesture)
-  return { send: send, newline: newline }
+  return { send: send, newline: newline, interrupt: interrupt }
 }
 
 /** Remove one value from a copy of the list. */
@@ -224,16 +227,28 @@ function sanitizeBindings(raw) {
   }
   var send = clean(raw != null ? raw.send : undefined, ['enter', 'ctrl+enter'])
   var newline = clean(raw != null ? raw.newline : undefined, ['shift+enter'])
+  var interrupt = clean(raw != null ? raw.interrupt : undefined, [])
   for (var i = newline.length - 1; i >= 0; i -= 1) {
     if (send.indexOf(newline[i]) !== -1) newline.splice(i, 1)
   }
-  return { send: send, newline: newline }
+  // Interrupt is the lowest-priority action: a chord already owned by send or
+  // newline can never double as interrupt.
+  for (var j = interrupt.length - 1; j >= 0; j -= 1) {
+    if (send.indexOf(interrupt[j]) !== -1 || newline.indexOf(interrupt[j]) !== -1) interrupt.splice(j, 1)
+  }
+  return { send: send, newline: newline, interrupt: interrupt }
+}
+
+/** Missing/null interrupt lists compare as empty (legacy sections tolerate). */
+function interruptList(bindings) {
+  return bindings != null && Array.isArray(bindings.interrupt) ? bindings.interrupt : []
 }
 
 /** Structural equality of two sanitized bindings objects. */
 function bindingsEqual(a, b) {
   return listEqual(a == null ? null : a.send, b == null ? null : b.send)
     && listEqual(a == null ? null : a.newline, b == null ? null : b.newline)
+    && listEqual(interruptList(a), interruptList(b))
 }
 
 function listEqual(a, b) {
@@ -249,6 +264,7 @@ function cloneBindings(bindings) {
   return {
     send: Array.isArray(bindings && bindings.send) ? bindings.send.slice() : [],
     newline: Array.isArray(bindings && bindings.newline) ? bindings.newline.slice() : [],
+    interrupt: Array.isArray(bindings && bindings.interrupt) ? bindings.interrupt.slice() : [],
   }
 }
 
@@ -336,10 +352,11 @@ window.__ModuleLoader__.load({
     var DEFAULTS = Object.freeze({
       send: Object.freeze(['enter', 'ctrl+enter']),
       newline: Object.freeze(['shift+enter']),
+      interrupt: Object.freeze([]),
     })
     var PRESETS = [
-      { id: 'native', bindings: { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'] } },
-      { id: 'chat', bindings: { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'] } },
+      { id: 'native', bindings: { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] } },
+      { id: 'chat', bindings: { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'], interrupt: [] } },
     ]
 
     var LOCALES = {
@@ -349,6 +366,7 @@ window.__ModuleLoader__.load({
         'row.configure': 'Configure…',
         'row.summary.send': 'Send',
         'row.summary.newline': 'Newline',
+        'row.summary.interrupt': 'Interrupt',
         'button.label': 'Composer key bindings',
         'panel.title': 'Composer keys',
         'panel.close': 'Close',
@@ -356,10 +374,14 @@ window.__ModuleLoader__.load({
         'action.send.desc': 'Submit the draft to the agent.',
         'action.newline': 'Newline',
         'action.newline.desc': 'Insert a line break at the caret.',
+        'action.interrupt': 'Interrupt',
+        'action.interrupt.desc': 'Abort the open session’s running task — same as the composer stop button. Works anywhere on the page while a task is running; no key bound by default.',
         'record.start': '+ Record keys',
         'record.waiting': 'Press a key combination… (Esc cancels)',
+        'record.waiting.interrupt': 'Press a key combination… (pressing Esc binds Esc; click this button again to cancel)',
         'hint.empty.send': 'No send key bound — use the send button.',
         'hint.empty.newline': 'No newline key bound.',
+        'hint.empty.interrupt': 'No interrupt key bound.',
         'preset.label': 'Presets:',
         'preset.native': 'DSH native',
         'preset.chat': 'Chat style',
@@ -373,6 +395,7 @@ window.__ModuleLoader__.load({
         'row.configure': '配置…',
         'row.summary.send': '发送',
         'row.summary.newline': '换行',
+        'row.summary.interrupt': '打断',
         'button.label': '输入框按键设置',
         'panel.title': '输入框按键',
         'panel.close': '关闭',
@@ -380,10 +403,14 @@ window.__ModuleLoader__.load({
         'action.send.desc': '把草稿提交给智能体。',
         'action.newline': '换行',
         'action.newline.desc': '在光标处插入换行。',
+        'action.interrupt': '打断',
+        'action.interrupt.desc': '中断当前打开会话正在运行的任务，等同于输入框的停止按钮；任务运行时在页面任意位置生效。默认无绑定。',
         'record.start': '+ 录制按键',
         'record.waiting': '请按下组合键…(Esc 取消)',
+        'record.waiting.interrupt': '请按下组合键…（按 Esc 即录制为打断键；再点本按钮取消）',
         'hint.empty.send': '未绑定发送键——只能通过发送按钮发送。',
         'hint.empty.newline': '未绑定换行键。',
+        'hint.empty.interrupt': '未绑定打断键。',
         'preset.label': '快速预设:',
         'preset.native': 'DSH 原生',
         'preset.chat': '微信风格',
@@ -475,6 +502,8 @@ window.__ModuleLoader__.load({
         var gesture = normalizeEventGesture(event)
         var action = actionForGesture(bindings, gesture)
         if (action === undefined) return
+        // Interrupt chords are owned by the page-wide engine below.
+        if (action === 'interrupt') return
         // Pristine default state: full zero-intervention (native traits intact).
         if (isPristineDefaults(bindings, DEFAULTS)) return
 
@@ -482,6 +511,37 @@ window.__ModuleLoader__.load({
         event.stopImmediatePropagation()
         if (action === 'newline') insertNewline(target)
         else replaySubmit(target)
+      }
+      window.addEventListener('keydown', onKeyDown, true)
+      return function () {
+        window.removeEventListener('keydown', onKeyDown, true)
+      }
+    }
+
+    /**
+     * Page-wide interrupt engine. Unlike the composer-scoped engine this one
+     * deliberately listens EVERYWHERE (the stop button must be reachable no
+     * matter where focus sits), with three yield rules:
+     *  - IME composition Esc (cancel candidates) is never touched;
+     *  - any open dialog / menu / listbox / our own panel keeps its native
+     *    Escape-to-close behavior;
+     *  - the key event is swallowed ONLY when the interrupt callback actually
+     *    fired (busy gate inside the callback) — idle presses flow untouched.
+     */
+    function installInterruptEngine(store, onInterrupt) {
+      var YIELD_SELECTOR = '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[role="listboxpopup"],[data-dsh-composer-keys-panel]'
+      var onKeyDown = function (event) {
+        if (event.isTrusted !== true) return
+        if (event.isComposing === true || event.keyCode === 229) return
+        var target = event.target
+        if (target instanceof Element && target.closest(YIELD_SELECTOR) !== null) return
+        var bindings = store.getSnapshot()
+        if (isPristineDefaults(bindings, DEFAULTS)) return
+        var gesture = normalizeEventGesture(event)
+        if (!gestureMatchesList(bindings.interrupt, gesture)) return
+        if (onInterrupt() !== true) return // busy gate failed: stay hands-off
+        event.preventDefault()
+        event.stopImmediatePropagation()
       }
       window.addEventListener('keydown', onKeyDown, true)
       return function () {
@@ -616,10 +676,12 @@ window.__ModuleLoader__.load({
         var onKeyDown = function (event) {
           event.preventDefault()
           event.stopImmediatePropagation()
-          if (event.key === 'Escape') {
+          if (event.key === 'Escape' && recording !== 'interrupt') {
             setRecording(null)
             return
           }
+          // Interrupt recording: Escape is the flagship binding target, so it
+          // REGISTERS instead of canceling (cancel by clicking the button again).
           var gesture = normalizeEventGesture(event)
           if (gesture === '') return // pure modifier press: keep waiting
           var next = moveGesture(props.store.getSnapshot(), gesture, recording)
@@ -652,6 +714,7 @@ window.__ModuleLoader__.load({
             createElement('button', { type: 'button', className: 'ck-x', 'aria-label': t('panel.close'), onClick: props.onClose }, '×')),
           createActionBlock(t, 'send', snapshot, recording, setRecording, props.writeBindings, setBindings),
           createActionBlock(t, 'newline', snapshot, recording, setRecording, props.writeBindings, setBindings),
+          createActionBlock(t, 'interrupt', snapshot, recording, setRecording, props.writeBindings, setBindings),
           createElement('div', { className: 'ck-foot' },
             createElement('span', { className: 'ck-presets-label' }, t('preset.label')),
             PRESETS.map(function (preset) {
@@ -689,7 +752,7 @@ window.__ModuleLoader__.load({
             className: 'ck-record',
             'data-recording': recording === action ? 'true' : 'false',
             onClick: toggleRecord,
-          }, recording === action ? t('record.waiting') : t('record.start'))),
+          }, recording === action ? t(action === 'interrupt' ? 'record.waiting.interrupt' : 'record.waiting') : t('record.start'))),
         createElement('div', { className: 'ck-chips' },
           list.map(function (gesture) {
             return createElement('span', { key: gesture, className: 'ck-chip' },
@@ -723,6 +786,9 @@ window.__ModuleLoader__.load({
             + (bindings.send.length > 0 ? bindings.send.map(prettifyBinding).join(' · ') : '—')
             + ' · ' + t('row.summary.newline') + ': '
             + (bindings.newline.length > 0 ? bindings.newline.map(prettifyBinding).join(' · ') : '—')
+          if (Array.isArray(bindings.interrupt) && bindings.interrupt.length > 0) {
+            summary += ' · ' + t('row.summary.interrupt') + ': ' + bindings.interrupt.map(prettifyBinding).join(' · ')
+          }
         }
       } catch (error) { /* summary is decorative */ }
       return createElement('div', { className: 'ck-row' },
@@ -767,9 +833,10 @@ window.__ModuleLoader__.load({
      * without declaration — `cannot get property X without inject`):
      * - locale: dictionary registration (`ctx.locale.register`);
      * - slots: Settings row + composer button registration;
-     * - settingsScope: durable key-binding persistence.
+     * - settingsScope: durable key-binding persistence;
+     * - sessions: interrupt action targets the currently open session.
      */
-    var CLIENT_INJECT = ['locale', 'slots', 'settingsScope']
+    var CLIENT_INJECT = ['locale', 'slots', 'settingsScope', 'sessions']
 
     function apply(ctx) {
       // Dictionaries first; later surfaces bind through the locale seat.
@@ -815,9 +882,46 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Interrupt action: resolve the CURRENTLY OPEN session through the
+       * sessions runtime and invoke the same cancel face the native stop
+       * button uses (`scope(id).get('conversation').cancel()`), so subagent
+       * address routing and error display behave identically. Returns true
+       * only when a cancel was actually dispatched — the page-wide engine
+       * swallows the key event solely on that signal.
+       */
+      function interruptCurrentSession() {
+        try {
+          var sessions = ctx.sessions
+          if (sessions == null || sessions.list == null || typeof sessions.list.getSnapshot !== 'function') return false
+          var snapshot = sessions.list.getSnapshot()
+          var id = snapshot.current
+          if (id === undefined || id === null) return false
+          var summary = snapshot.byId != null ? snapshot.byId[id] : undefined
+          // Busy gate: an idle press stays hands-off (native Esc semantics win).
+          if (summary == null || summary.running !== true) return false
+          var conversation = undefined
+          if (typeof sessions.scope === 'function') {
+            var scoped = sessions.scope(id)
+            if (scoped !== undefined && scoped !== null && typeof scoped.get === 'function') {
+              conversation = scoped.get('conversation')
+            }
+          }
+          if ((conversation == null || typeof conversation.cancel !== 'function') && typeof sessions.binding === 'function') {
+            var binding = sessions.binding(id)
+            if (binding != null) conversation = binding.session
+          }
+          if (conversation == null || typeof conversation.cancel !== 'function') return false
+          void conversation.cancel().catch(noop)
+          return true
+        } catch (error) { return false }
+      }
+
       // Keyboard engine: window-capture keydown, scoped to the composer box.
       var disposeKeyboard = noop
-      try { disposeKeyboard = installKeyboardEngine(store) } catch (error) { /* stay inert rather than break the page */ }
+      try { disposeKeyboard = installKeyboardEngine(store, interruptCurrentSession) } catch (error) { /* stay inert rather than break the page */ }
+      var disposeInterrupt = noop
+      try { disposeInterrupt = installInterruptEngine(store, interruptCurrentSession) } catch (error) { /* stay inert rather than break the page */ }
 
       // Panel singleton lifecycle (created lazily on first open).
       var panel = createPanelController(store, writeBindings, t)
@@ -856,6 +960,7 @@ window.__ModuleLoader__.load({
 
       return function cleanup() {
         try { disposeKeyboard() } catch (error) {}
+        try { disposeInterrupt() } catch (error) {}
         try { panel.dispose() } catch (error) {}
         try {
           if (styleInstall.owned && styleInstall.node) styleInstall.node.remove()

@@ -30,6 +30,8 @@ export const DEFAULT_BINDINGS = Object.freeze({
   send: Object.freeze(['enter', 'ctrl+enter']),
   /** Gestures that insert a newline at the caret. */
   newline: Object.freeze(['shift+enter']),
+  /** Gestures that abort the open session's running task. Empty by default. */
+  interrupt: Object.freeze([]),
 })
 
 /**
@@ -41,6 +43,7 @@ export const DEFAULT_BINDINGS = Object.freeze({
 export const ComposerKeysSettingsSchema = Schema.object({
   send: Schema.array(Schema.string()).default([...DEFAULT_BINDINGS.send]),
   newline: Schema.array(Schema.string()).default([...DEFAULT_BINDINGS.newline]),
+  interrupt: Schema.array(Schema.string()).default([...DEFAULT_BINDINGS.interrupt]),
 })
 
 /**

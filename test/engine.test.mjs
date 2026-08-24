@@ -37,8 +37,8 @@ const {
   prettifyBinding,
 } = hooks
 
-const NATIVE = { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'] }
-const CHAT_STYLE = { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'] }
+const NATIVE = { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] }
+const CHAT_STYLE = { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'], interrupt: [] }
 
 test('loadHooks: the shipped client.js exposes a full hook set', () => {
   for (const key of [
@@ -125,22 +125,30 @@ test('gestureMatchesBinding: exact modifiers; mod binds either ctrl or meta', ()
   assert.equal(gestureMatchesBinding('ctrl+s', 'foo'), false)
 })
 
-test('actionForGesture: send wins ties; unknown gestures resolve to undefined', () => {
-  const both = { send: ['enter'], newline: ['enter'] }
+test('actionForGesture: send wins ties; interrupt lowest; unknown → undefined', () => {
+  const both = { send: ['enter'], newline: ['enter'], interrupt: [] }
   assert.equal(actionForGesture(both, 'enter'), 'send')
   assert.equal(actionForGesture(NATIVE, 'shift+enter'), 'newline')
   assert.equal(actionForGesture(NATIVE, 'ctrl+alt+f7'), undefined)
   assert.equal(actionForGesture(NATIVE, ''), undefined)
   assert.equal(actionForGesture(NATIVE, 'enter'), 'send')
   assert.equal(actionForGesture(null, 'enter'), undefined)
+  const withInterrupt = { send: [], newline: [], interrupt: ['escape', 'ctrl+break'] }
+  assert.equal(actionForGesture(withInterrupt, 'escape'), 'interrupt')
 })
 
 test('zero-intervention guarantee: pristine defaults keep the engine fully hands-off', () => {
   assert.equal(isPristineDefaults(NATIVE, NATIVE), true, 'default bindings are pristine')
   // Any deviation — a preset, an added chord, an empty list — ends pass-through.
   assert.equal(isPristineDefaults(CHAT_STYLE, NATIVE), false, 'chat-style is customized')
-  assert.equal(isPristineDefaults({ send: ['enter'], newline: ['shift+enter'] }, NATIVE), false, 'one chord removed')
-  assert.equal(isPristineDefaults({ send: [], newline: [] }, NATIVE), false, 'cleared lists')
+  assert.equal(isPristineDefaults({ send: ['enter'], newline: ['shift+enter'], interrupt: [] }, NATIVE), false, 'one chord removed')
+  assert.equal(isPristineDefaults({ send: [], newline: [], interrupt: [] }, NATIVE), false, 'cleared lists')
+  // Binding ONLY an interrupt key is also a customization (engine arms for it).
+  assert.equal(
+    isPristineDefaults({ send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: ['escape'] }, NATIVE),
+    false,
+    'interrupt binding alone ends pass-through',
+  )
 })
 
 test('customized bindings intercept uniformly (no per-chord native equivalence)', () => {
@@ -156,7 +164,7 @@ test('customized bindings intercept uniformly (no per-chord native equivalence)'
   assert.equal(isPristineDefaults(custom, NATIVE), false)
 })
 
-test('moveGesture: moving enforces mutual exclusion', () => {
+test('moveGesture: moving enforces mutual exclusion across all three actions', () => {
   const moved = moveGesture(NATIVE, 'enter', 'newline')
   assert.deepEqual(moved.send.sort(), ['ctrl+enter'])
   assert.deepEqual(moved.newline.sort(), ['enter', 'shift+enter'])
@@ -166,6 +174,10 @@ test('moveGesture: moving enforces mutual exclusion', () => {
   // Moving an unknown gesture just appends it.
   const added = moveGesture(NATIVE, 'alt+q', 'newline')
   assert.ok(added.newline.includes('alt+q'))
+  // Interrupt is a first-class target: moving there clears other owners.
+  const toInterrupt = moveGesture(CHAT_STYLE, 'ctrl+enter', 'interrupt')
+  assert.equal(toInterrupt.send.includes('ctrl+enter'), false)
+  assert.deepEqual(toInterrupt.interrupt, ['ctrl+enter'])
 })
 
 test('sanitizeBindings: hostile shapes fall back field-by-field; junk entries dropped', () => {
@@ -174,35 +186,45 @@ test('sanitizeBindings: hostile shapes fall back field-by-field; junk entries dr
   // Missing fields mean "never configured" → defaults; explicit [] means cleared.
   assert.deepEqual(
     sanitizeBindings({}),
-    { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'] },
+    { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] },
     'absent fields fall back to the shipped defaults',
   )
   assert.deepEqual(
-    sanitizeBindings({ send: [], newline: [] }),
-    { send: [], newline: [] },
+    sanitizeBindings({ send: [], newline: [], interrupt: [] }),
+    { send: [], newline: [], interrupt: [] },
     'explicit empty arrays are a deliberate clear and survive',
   )
   assert.deepEqual(
     sanitizeBindings({ send: 'nope' }),
-    { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'] },
+    { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] },
     'non-array field falls back to default while missing sibling gets its own default',
   )
   assert.deepEqual(
     sanitizeBindings({ send: [' CTRL + ENTER ', 'bogus+chord', '', 'ctrl+enter', 42, null], newline: ['SHIFT+ENTER'] }),
-    { send: ['ctrl+enter'], newline: ['shift+enter'] },
+    { send: ['ctrl+enter'], newline: ['shift+enter'], interrupt: [] },
     'trim/lowercase/dedupe/parse-check all apply',
   )
   assert.deepEqual(
     sanitizeBindings({ send: ['ctrl+s'], newline: 'nope' }),
-    { send: ['ctrl+s'], newline: ['shift+enter'] },
+    { send: ['ctrl+s'], newline: ['shift+enter'], interrupt: [] },
     'valid custom list survives; broken sibling falls back',
+  )
+  assert.deepEqual(
+    sanitizeBindings({ interrupt: [' ESCAPE ', 'escape', 'mod+m'] }),
+    { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: ['escape', 'mod+m'] },
+    'interrupt list sanitizes on its own terms',
   )
 })
 
-test('sanitizeBindings: cross-action duplicates resolve toward send', () => {
+test('sanitizeBindings: cross-action duplicates resolve toward send, then newline', () => {
   assert.deepEqual(
     sanitizeBindings({ send: ['enter'], newline: ['enter', 'shift+enter'] }),
-    { send: ['enter'], newline: ['shift+enter'] },
+    { send: ['enter'], newline: ['shift+enter'], interrupt: [] },
+  )
+  // Interrupt is lowest priority: a chord owned above can never double as it.
+  assert.deepEqual(
+    sanitizeBindings({ send: ['enter'], newline: ['shift+enter'], interrupt: ['enter', 'escape'] }),
+    { send: ['enter'], newline: ['shift+enter'], interrupt: ['escape'] },
   )
 })
 
@@ -210,6 +232,15 @@ test('bindingsEqual & cloneBindings: structural equality, independent arrays', (
   assert.equal(bindingsEqual(NATIVE, { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'] }), true)
   assert.equal(bindingsEqual(NATIVE, CHAT_STYLE), false)
   assert.equal(bindingsEqual({ send: [], newline: [] }, { send: [], newline: [] }), true)
+  // Legacy sections without an interrupt key compare as empty.
+  assert.equal(
+    bindingsEqual({ send: ['enter'], newline: ['shift+enter'] }, { send: ['enter'], newline: ['shift+enter'], interrupt: [] }),
+    true,
+  )
+  assert.equal(
+    bindingsEqual({ send: ['enter'], newline: ['shift+enter'], interrupt: ['escape'] }, { send: ['enter'], newline: ['shift+enter'], interrupt: [] }),
+    false,
+  )
 
   const clone = cloneBindings(NATIVE)
   clone.send.push('alt+x')
@@ -224,4 +255,5 @@ test('prettifyBinding: human-readable labels', () => {
   assert.equal(prettifyBinding('ctrl+alt+arrowup'), 'Ctrl+Alt+↑')
   assert.equal(prettifyBinding('space'), 'Space')
   assert.equal(prettifyBinding('f4'), 'F4')
+  assert.equal(prettifyBinding('escape'), 'Esc')
 })
