@@ -339,11 +339,40 @@ window.__ModuleLoader__.load({
     var React = safeRequire('react')
     var reactDomClient = safeRequire('react-dom/client')
     var primitives = safeRequire('@deepseek-ai/dsh-client-ui-primitives')
+    // DSH 0.1.5+ moved createSnapshotStore to @deepseek-ai/dsh-client-store;
+    // older versions keep it in @deepseek-ai/dsh-client-runtime/client.
+    var clientStore = safeRequire('@deepseek-ai/dsh-client-store')
     var runtime = safeRequire('@deepseek-ai/dsh-client-runtime/client')
 
     var createElement = React.createElement
     var Tooltip = primitives.Tooltip
-    var createSnapshotStore = runtime.createSnapshotStore
+    var createSnapshotStore = clientStore.createSnapshotStore || runtime.createSnapshotStore
+    if (typeof createSnapshotStore !== 'function') {
+      // Polyfill: simple snapshot store matching the runtime API surface
+      // used by this plugin (getSnapshot / set / subscribe).
+      createSnapshotStore = function (init) {
+        var value = init
+        var listeners = []
+        var api = {
+          getSnapshot: function () { return value },
+          set: function (next) {
+            value = next
+            for (var i = 0; i < listeners.length; i += 1) {
+              try { listeners[i]() } catch (e) {}
+            }
+          },
+          subscribe: function (fn) {
+            listeners.push(fn)
+            return function () {
+              for (var i = listeners.length - 1; i >= 0; i -= 1) {
+                if (listeners[i] === fn) { listeners.splice(i, 1); return }
+              }
+            }
+          },
+        }
+        return api
+      }
+    }
 
     var NS = 'composer-keys'
     var STYLE_ATTRIBUTE = 'data-dsh-composer-keys-style'
