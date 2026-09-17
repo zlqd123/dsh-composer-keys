@@ -11,6 +11,7 @@ name: Publish to npm
 on:
   release:
     types: [published]
+  workflow_dispatch: # manual trigger for debugging the OIDC path
 
 permissions:
   id-token: write # OIDC — the key to Trusted Publishing
@@ -49,4 +50,9 @@ jobs:
       # use the (invalid) token instead. With the env absent, npm's automatic
       # OIDC detection kicks in and authenticates via the trusted publisher.
       - name: Publish
-        run: npm publish
+        run: |
+          npm config delete //registry.npmjs.org/:_authToken || true
+          npm whoami --registry https://registry.npmjs.org && echo "AUTH OK via OIDC" || echo "AUTH FAILED"
+          npm publish --loglevel=silly 2>&1 | tail -60 || true
+          npm view dsh-composer-keys@${GITHUB_REF_NAME#v} version --registry https://registry.npmjs.org \
+            && echo "PUBLISH OK" || { echo "::error::publish did not land"; exit 1; }
