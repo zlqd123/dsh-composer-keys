@@ -1,8 +1,14 @@
-name: Publish to npm
+name: Publish to npm (staged)
 
-# Triggered by a GitHub Release being published. Uses npm Trusted
-# Publishing (OIDC): no stored token, no OTP. Requires a one-time
-# registration of this repo in the npm package settings.
+# Triggered by a GitHub Release being published.
+#
+# Uses npm STAGED publishing: CI stages the package (no 2FA needed), the
+# maintainer then reviews and approves it on npmjs.com (Staged Packages tab)
+# with the hardware key. This pairs with Trusted Publishing (OIDC) so no
+# token or OTP ever exists in CI.
+#
+# One-time setup in the npm package settings:
+#   Trusted Publisher -> owner zlqd123 / repo dsh-composer-keys / file publish.yml
 
 on:
   release:
@@ -23,10 +29,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Node 22 bundles an npm too old for `npm stage`; CI always uses the
+      # latest npm so the staged commands exist.
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Run tests
         run: node --test test/*.test.mjs
 
-      # Fail before publish if the release tag and package.json disagree.
+      # Fail before staging if the release tag and package.json disagree.
       - name: Verify version matches release tag
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
@@ -36,7 +47,10 @@ jobs:
             exit 1
           fi
 
-      - name: Publish
-        run: npm publish
+      # Stage instead of publish: no 2FA needed for this step. The package
+      # goes live only after the maintainer approves it on npmjs.com
+      # (Staged Packages tab) with the hardware key.
+      - name: Stage package
+        run: npm stage publish
         env:
           NODE_AUTH_TOKEN: 'unused' # required non-empty by setup-node; OIDC is what authenticates
