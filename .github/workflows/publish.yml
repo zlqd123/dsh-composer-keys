@@ -1,0 +1,42 @@
+name: Publish to npm
+
+# Triggered by a GitHub Release being published. Uses npm Trusted
+# Publishing (OIDC): no stored token, no OTP. Requires a one-time
+# registration of this repo in the npm package settings.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write # OIDC — the key to Trusted Publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Run tests
+        run: node --test test/*.test.mjs
+
+      # Fail before publish if the release tag and package.json disagree.
+      - name: Verify version matches release tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json ($PKG_VERSION) != release tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: 'unused' # required non-empty by setup-node; OIDC is what authenticates
