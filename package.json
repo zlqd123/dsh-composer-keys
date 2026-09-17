@@ -18,7 +18,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/engine.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "deepseek-harness",
@@ -46,9 +46,6 @@
   "homepage": "https://github.com/zlqd123/dsh-composer-keys#readme",
   "engines": {
     "node": ">=22.19.0"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "dsh": {
     "bundle": {

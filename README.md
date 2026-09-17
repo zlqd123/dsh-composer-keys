@@ -85,12 +85,12 @@ dsh plugin --profile web remove dsh-composer-keys
 - 浏览器半件是手写的 lazy-CJS bundle（`window.__ModuleLoader__.load({id, factory})`），无构建步骤；
 - 宿主半件只做一件事：向 Host 设置服务注册 `composer-keys` 命名空间 schema，让浏览器半件的 `ctx.settingsScope.bind()` 可以读写持久化配置（apiproxy 对所有注册命名空间一视同仁地提供给 Web 端）；
 - **客户端插件的 inject 契约**：工厂必须返回 `{ apply, inject: ['locale', 'slots', 'settingsScope'] }`——vendored cordis 对未声明服务的属性访问会直接抛 `cannot get property X without inject`，导致整个 entry 引导失败（页面横幅 "Failed to load plugins"）。这是本插件踩过的坑，写在这里给其他插件作者参考；
-- 「发送」＝重放合成普通 Enter（见上文两层语义）；「换行」＝`document.execCommand('insertText', '\n')`，经由受控 textarea 的原生编辑事件同步 React 草稿状态（带 native value setter 回退路径）；
+- 「发送」＝重放合成普通 Enter（见上文两层语义）；「换行」＝在 DSH ≥0.1.5 的 Lexical 编辑器中，从当前编辑器的命令注册表取出 `INSERT_LINE_BREAK_COMMAND` **对象本身**并 dispatch，保持草稿、选区及撤销历史同步；旧 textarea 仍使用原生编辑和 value setter 回退。命令按对象身份匹配，不能传命令名字符串，也不能用另一份 Lexical 导入的同名对象；
 - 面板样式仅引用真实存在的 DSH token（`--dsw-alias-bg-layer-*`、`--dsw-alias-border-l*`、`--dsw-alias-label-*`、`--dsw-alias-interactive-bg-hover`、`--dsw-alias-brand-primary`、`--dsw-alias-bg-mask-1`）。
 
 ## 已知限制
 
-- DSH 大版本升级若改变输入框 DOM 结构（目前锚点是 `[data-input-scroll]`）或调整语义 token 名，拦截/配色可能失效——失效模式是"插件静默不生效"，不会破坏原生功能；
+- DSH 大版本升级若改变输入框 DOM 结构（目前锚点是 `[data-input-scroll]`）或调整语义 token 名，拦截/配色可能失效。Lexical 换行适配依赖 `__lexicalEditor`、`_commands` 与命令的 `type` 标签：若宿主不再提供这些字段或命令拒绝处理，插件会**阻止已绑定的换行键并输出控制台警告**（避免 Enter 意外发送草稿），不会绕过编辑器直接修改 DOM；
 - 极端自定义主题下对比度可能欠佳（token 兜底为浅色值）。
 
 <a id="english"></a>
@@ -114,7 +114,19 @@ Install: `dsh plugin --profile web add /path/to/dsh-composer-keys`, then restart
 npm test
 ```
 
-测试用 Node 内置测试运行器直接评估 `client.js` 的真实源码（提取其中的纯手势引擎），无需构建、无第三方依赖。覆盖：手势归一化、绑定解析（含 mod 别名）、动作解析、零干预判定、互斥迁移、脏数据清洗、显示格式化。
+测试用 Node 内置测试运行器直接评估 `client.js` 的真实源码（提取其中的纯手势引擎与换行路径），无需构建、无第三方依赖。覆盖：手势归一化、绑定解析（含 mod 别名）、动作解析、零干预判定、互斥迁移、脏数据清洗、显示格式化，以及 Lexical 命令对象身份匹配、不可用时防误发送、IME/合成事件放行。
+
+本地浏览器回归（本地工具，不写入 package.json）：playwright-core 从本地安装 / `$PLAYWRIGHT_CORE_PATH` / npm 全局目录自动解析，浏览器自动探测系统 Chrome/Edge（`CHROME_PATH` 可显式指定）：
+
+```powershell
+node test/newline-regression.mjs '<本地 dsh-client-ui-conversation/lib/client.js 的绝对路径>'
+```
+
+该脚本针对本地 DSH bundle 的 Lexical 和原生 composer keymap 建立隔离页面，以真实浏览器按键验证换行、发送回调、选区替换和撤销/重做；不启动 DSH 服务、不改用户设置、不发起模型请求，不等同于完整在线 GUI 部署验证。
+
+### 新版换行兼容修复（DSH ≥0.1.5）
+
+修复了 DSH 0.1.6-alpha.1 中自定义换行失效：旧实现用**字符串** dispatch Lexical 命令（Lexical 按对象身份匹配命令，字符串永远失配），且 DOM 编辑回退可能不同步编辑器状态。新实现使用当前编辑器注册的命令对象；命令不可用时阻止已绑定的换行键，避免 Enter 意外发送草稿。已在 DSH `0.1.6-alpha.1`（Node 26, Windows 11, pnpm 11 hoisted profile）上验证。更新插件后重启加载该插件的 `dsh web` 并刷新浏览器即可；此插件为手写浏览器 bundle，无需额外编译。
 
 ## License
 

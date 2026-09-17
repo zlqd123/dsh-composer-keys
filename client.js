@@ -7,17 +7,16 @@
  * the factory closure. No build step.
  *
  * What it does
- * - Captures keydowns aimed at the chat composer textarea ([data-input-scroll])
+ * - Captures keydowns aimed at the chat composer input ([data-input-scroll])
  *   and resolves them against user-configured bindings: which chords submit
  *   ("send") and which insert a line break ("newline").
  * - Send replays one synthetic trusted=false Enter keydown so the NATIVE
  *   composer handler keeps owning the whole submission pipeline: slash-menu
  *   arbitration, repeat guard, machine-busy guards, and busy queue-vs-steer
- *   (the native「繁忙时 Enter 键行为」setting). Ctrl/Cmd+Enter-originated sends
- *   replay WITH the accelerator flag, preserving its opposite-behavior trait;
- *   every other bound chord replays as plain Enter.
- * - Newline inserts "\n" at the caret through execCommand('insertText') so the
- *   controlled React draft stays in sync (native-setter fallback provided).
+ *   (the native「繁忙时 Enter 键行为」setting). All customized send bindings
+ *   replay as plain Enter; pristine defaults pass through unchanged.
+ * - Newline dispatches the existing Lexical line-break command object so draft,
+ *   selection and undo history stay in sync. Legacy textareas use native editing.
  * - Bindings persist in the Host user-settings document under the
  *   `composer-keys` namespace (registered by the host half), exactly like the
  *   native busy-Enter preference.
@@ -514,6 +513,17 @@ window.__ModuleLoader__.load({
 
     // ── Keyboard engine ──────────────────────────────────────────────────────
 
+    /** Whether an element is the main chat composer input. */
+    function isComposerInput(target) {
+      if (!target || typeof target.closest !== 'function') return false
+      if (target.closest('[data-input-scroll]') == null) return false
+      // DSH ≤0.1.4: HTMLTextAreaElement; DSH ≥0.1.5: Lexical contentEditable div.
+      if (target instanceof HTMLTextAreaElement) return true
+      if (target.getAttribute && target.getAttribute('data-composer-input') === 'true') return true
+      if (target.contentEditable === 'true') return true
+      return false
+    }
+
     function installKeyboardEngine(store) {
       var onKeyDown = function (event) {
         // Synthetic events (including OUR replayed Enter) pass through so the
@@ -522,9 +532,7 @@ window.__ModuleLoader__.load({
         // IME composition: candidate-picking Enter must never be touched.
         if (event.isComposing === true || event.keyCode === 229) return
         var target = event.target
-        if (!(target instanceof HTMLTextAreaElement)) return
-        // Main chat composer only — InputBar's own stable anchor attribute.
-        if (target.closest('[data-input-scroll]') == null) return
+        if (!isComposerInput(target)) return
         if (target.disabled || target.readOnly) return
 
         var bindings = store.getSnapshot()
@@ -536,10 +544,19 @@ window.__ModuleLoader__.load({
         // Pristine default state: full zero-intervention (native traits intact).
         if (isPristineDefaults(bindings, DEFAULTS)) return
 
-        event.preventDefault()
-        event.stopImmediatePropagation()
-        if (action === 'newline') insertNewline(target)
-        else replaySubmit(target)
+        if (action === 'newline') {
+          // Never let a failed custom newline fall through as native Enter:
+          // that could SEND a draft the user only meant to edit.
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          if (!insertNewline(target)) {
+            console.warn('[composer-keys] unable to insert newline in this editor')
+          }
+        } else {
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          replaySubmit(target)
+        }
       }
       window.addEventListener('keydown', onKeyDown, true)
       return function () {
@@ -603,26 +620,54 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Insert '\n' at the caret while keeping the controlled React draft in
-     * sync: execCommand routes through beforeinput/input so the machine's edit
-     * range math works unchanged; the fallback writes through the native value
-     * setter and re-dispatches input (standard controlled-component fix).
+     * Insert '\n' at the caret while keeping the controlled React/Lexical draft
+     * in sync. Returns true on success, false on failure — the caller decides
+     * whether to prevent the browser default.
      */
     function insertNewline(target) {
       try { target.focus() } catch (error) {}
+
+      // DSH ≥0.1.5: Lexical commands are identity-keyed OBJECTS, not names.
+      // Use the registered object from THIS editor (even a second imported
+      // Lexical copy would create a different identity). The vendored build
+      // retains the command's type label. Keep this private-API bridge guarded:
+      // if it changes, fail closed instead of editing DOM behind Lexical's back.
+      var editor = target.__lexicalEditor
+      if (editor) {
+        try {
+          var command = null
+          if (editor._commands && typeof editor._commands.forEach === 'function') {
+            editor._commands.forEach(function (_, key) {
+              if (key && key.type === 'INSERT_LINE_BREAK_COMMAND') command = key
+            })
+          }
+          return command !== null && typeof editor.dispatchCommand === 'function'
+            && editor.dispatchCommand(command, false) === true
+        } catch (error) { return false }
+      }
+
+      // Legacy textarea / plain contentEditable only. execCommand's return
+      // value is NOT evidence of an edit reaching a Lexical state transaction.
       var handled = false
-      try { handled = document.execCommand('insertText', false, '\n') } catch (error) { handled = false }
-      if (handled) return
-      try {
-        var start = typeof target.selectionStart === 'number' ? target.selectionStart : target.value.length
-        var end = typeof target.selectionEnd === 'number' ? target.selectionEnd : start
-        target.setRangeText('\n', start, end, 'end')
-        var setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-        setter.call(target, target.value)
-        target.dispatchEvent(new Event('input', { bubbles: true }))
-        var caret = start + 1
-        target.setSelectionRange(caret, caret)
-      } catch (error) { /* give up silently: worst case the key does nothing */ }
+      try { handled = document.execCommand('insertText', false, '\n') } catch (error) {}
+      if (handled) return true
+
+      // Textarea value-setter fallback (DSH ≤0.1.4).
+      if (target instanceof HTMLTextAreaElement) {
+        try {
+          var start = typeof target.selectionStart === 'number' ? target.selectionStart : target.value.length
+          var end = typeof target.selectionEnd === 'number' ? target.selectionEnd : start
+          target.setRangeText('\n', start, end, 'end')
+          var setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+          setter.call(target, target.value)
+          target.dispatchEvent(new Event('input', { bubbles: true }))
+          var caret = start + 1
+          target.setSelectionRange(caret, caret)
+          return true
+        } catch (error) { /* give up silently */ }
+      }
+
+      return false
     }
 
     // ── Floating panel (single React root over the document body) ───────────
