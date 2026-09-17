@@ -1,6 +1,6 @@
 {
   "name": "dsh-composer-keys",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "为 DeepSeek Harness Web 的聊天输入框自定义发送与换行键位：Enter / Ctrl+Enter / Shift+Enter / 任意自定义组合键可自由分配给「发送」或「换行」，默认保持 DSH 原生行为；忙碌时的排队/转向语义仍由原生「繁忙时 Enter 键行为」设置决定。Customizable send & newline key bindings for the DeepSeek Harness web composer: assign Enter, Ctrl+Enter, Shift+Enter, or any custom chord to Send or Newline. Native behavior is preserved by default; busy queue-vs-steer stays owned by the native Busy-Enter setting.",
   "type": "module",
   "main": "index.js",
