@@ -45,7 +45,8 @@ jobs:
             exit 1
           fi
 
+      # No NODE_AUTH_TOKEN here: setting it makes npm skip OIDC detection and
+      # use the (invalid) token instead. With the env absent, npm's automatic
+      # OIDC detection kicks in and authenticates via the trusted publisher.
       - name: Publish
         run: npm publish
-        env:
-          NODE_AUTH_TOKEN: 'unused' # required non-empty by setup-node; the OIDC token is what authenticates
