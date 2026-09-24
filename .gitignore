@@ -1,4 +1,6 @@
+# Dependencies (tests are source-eval'd; the host resolves schemastery itself)
 node_modules/
-*.log
-.DS_Store
-Thumbs.db
+
+# Local agent knowledge — deliberately NOT published (npm files whitelist
+# excludes it too): syncs to GitHub only as the working copy.
+SKILL.md

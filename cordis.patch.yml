@@ -1,6 +1,7 @@
-# dsh-composer-keys bundle patch: inserts one host-side service whose only job
-# is registering the plugin's user-settings namespace so the browser half can
-# persist key bindings through the standard settings document transport.
+# dsh-composer-keys bundle patch: inserts the host-side entry whose id
+# (`composer-keys`) doubles as the user-settings namespace the browser half
+# binds through `configForms.get('composer-keys')` (0.1.7) /
+# `settingsScope.bind({ namespace })` (≤0.1.6).
 - insert:
     - id: composer-keys
       name: dsh-composer-keys

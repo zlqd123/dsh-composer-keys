@@ -291,6 +291,230 @@ function prettifyBinding(binding) {
     .join('+')
 }
 
+/**
+ * Shipped defaults — identical to the harness-native behavior, so installing
+ * the plugin changes nothing until the user rebinds. Declared in the pure
+ * section (not inside the browser factory) so the scheme helpers below and
+ * the test hooks can see them; the factory closes over them lexically.
+ */
+var DEFAULTS = Object.freeze({
+  send: Object.freeze(['enter', 'ctrl+enter']),
+  newline: Object.freeze(['shift+enter']),
+  interrupt: Object.freeze([]),
+})
+
+/** Built-in scheme templates (id doubles as the preset chip key). */
+var PRESETS = [
+  { id: 'native', bindings: { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] } },
+  { id: 'chat', bindings: { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'], interrupt: [] } },
+]
+
+/** Maximum custom presets a user may store alongside the two built-ins. */
+var MAX_CUSTOM_PRESETS = 3
+
+/**
+ * Normalize a raw custom-preset list read from the settings document: keep at
+ * most MAX_CUSTOM_PRESETS well-formed entries, trim names (dropping blank
+ * ones, first-wins on duplicates), and sanitize every entry's three binding
+ * lists through sanitizeBindings. Anything that is not an array collapses to [].
+ * @param {*} raw - the raw `presets` section value.
+ * @returns {Array<{name: string, send: string[], newline: string[], interrupt: string[]}>}
+ */
+function sanitizeCustomPresets(raw) {
+  if (!Array.isArray(raw)) return []
+  var out = []
+  for (var i = 0; i < raw.length && out.length < MAX_CUSTOM_PRESETS; i += 1) {
+    var item = raw[i]
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
+    var name = typeof item.name === 'string' ? item.name.trim().slice(0, 32) : ''
+    if (name === '') continue
+    var duplicate = false
+    for (var j = 0; j < out.length; j += 1) {
+      if (out[j].name === name) { duplicate = true; break }
+    }
+    if (duplicate) continue
+    var bindings = sanitizeBindings(item)
+    out.push({
+      name: name,
+      send: bindings.send.slice(),
+      newline: bindings.newline.slice(),
+      interrupt: bindings.interrupt.slice(),
+    })
+  }
+  return out
+}
+
+/**
+ * Structural equality for sanitized custom-preset lists — used both to adopt
+ * an unchanged scope view and to confirm that an echo matches a pending write.
+ * @param {Array} a - first list.
+ * @param {Array} b - second list.
+ * @returns {boolean} whether both lists describe the same presets in order.
+ */
+function presetsEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (var i = 0; i < a.length; i += 1) {
+    if (a[i].name !== b[i].name) return false
+    if (!bindingsEqual(a[i], b[i])) return false
+  }
+  return true
+}
+
+/**
+ * Normalize the persisted built-in scheme overrides read from the settings
+ * document: only the two reserved ids (`native`, `chat`) survive — one entry
+ * each, first occurrence wins — and every entry's triple is re-sanitized
+ * through sanitizeBindings. Anything that is not an array collapses to [].
+ * @param {*} raw - the raw `builtinSchemes` section value.
+ * @returns {Array<{id: string, send: string[], newline: string[], interrupt: string[]}>}
+ */
+function sanitizeBuiltinSchemes(raw) {
+  if (!Array.isArray(raw)) return []
+  var out = []
+  for (var i = 0; i < raw.length; i += 1) {
+    var item = raw[i]
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
+    var id = typeof item.id === 'string' ? item.id : ''
+    if (id !== 'native' && id !== 'chat') continue
+    var seen = false
+    for (var j = 0; j < out.length; j += 1) {
+      if (out[j].id === id) { seen = true; break }
+    }
+    if (seen) continue
+    var triple = sanitizeBindings(item)
+    out.push({
+      id: id,
+      send: triple.send.slice(),
+      newline: triple.newline.slice(),
+      interrupt: triple.interrupt.slice(),
+    })
+  }
+  return out
+}
+
+/**
+ * Resolve a built-in scheme's FULL binding triple: the user's persisted
+ * override for that id when present, otherwise the shipped template. Schemes
+ * are isolated — applying one loads exactly ITS triple (all three channels),
+ * never a value inherited from whichever scheme ran before.
+ * @param {string} id - 'native' | 'chat'.
+ * @param {Array} overrides - sanitized builtinSchemes list (or garbage).
+ * @returns {{send: string[], newline: string[], interrupt: string[]}} an independent copy.
+ */
+function resolveBuiltinTriple(id, overrides) {
+  var list = Array.isArray(overrides) ? overrides : []
+  for (var i = 0; i < list.length; i += 1) {
+    if (list[i] != null && list[i].id === id) {
+      return {
+        send: list[i].send.slice(),
+        newline: list[i].newline.slice(),
+        interrupt: list[i].interrupt.slice(),
+      }
+    }
+  }
+  for (var j = 0; j < PRESETS.length; j += 1) {
+    if (PRESETS[j].id === id) {
+      var template = PRESETS[j].bindings
+      return {
+        send: template.send.slice(),
+        newline: template.newline.slice(),
+        interrupt: template.interrupt.slice(),
+      }
+    }
+  }
+  return cloneBindings(DEFAULTS)
+}
+
+/**
+ * Identify which scheme the given triple belongs to: custom presets are
+ * checked first (an explicitly saved scheme wins over an identical
+ * built-in), then `chat`, then `native` — each compared against its
+ * OVERRIDE-resolved triple so a scheme with recorded keys still matches.
+ * Used BEFORE an edit commits so channel edits write back into the scheme
+ * the user is actually editing ("各方案的隔离": the edit belongs to the
+ * active scheme, and preset round-trips then restore it intact).
+ * @param {{send: string[], newline: string[], interrupt: string[]}|null} triple - candidate bindings.
+ * @param {Array} builtinOverrides - sanitized builtinSchemes list.
+ * @param {Array} customPresets - sanitized custom presets list.
+ * @returns {string|null} 'native' | 'chat' | a custom preset's name, or null (freestyle).
+ */
+function matchActiveScheme(triple, builtinOverrides, customPresets) {
+  if (triple == null) return null
+  var customs = Array.isArray(customPresets) ? customPresets : []
+  for (var i = 0; i < customs.length; i += 1) {
+    if (bindingsEqual(customs[i], triple)) return customs[i].name
+  }
+  if (bindingsEqual(resolveBuiltinTriple('chat', builtinOverrides), triple)) return 'chat'
+  if (bindingsEqual(resolveBuiltinTriple('native', builtinOverrides), triple)) return 'native'
+  return null
+}
+
+/**
+ * Pick the session an interrupt should target, mirroring the OFFICIAL
+ * current-session resolution (uiSession `publishMain`): the tracked current
+ * session wins while the main view retains it; otherwise whichever session
+ * the main view retains; then the tracked current (startup timing gap), the
+ * legacy list `current` field (older generations), and finally — when exactly
+ * one session is open — that session. The raw list snapshot has NO `current`
+ * field on 0.1.7 (reading it yielded `undefined` → interrupt never fired).
+ * @param {*} listSnapshot - `sessions.list` snapshot (byId rows / legacy current).
+ * @param {string|undefined} uiCurrentKey - `uiSession.current.value.key`, if available.
+ * @returns {string|null} the target session id, or null when nothing is open.
+ */
+function resolveCurrentSessionId(listSnapshot, uiCurrentKey) {
+  var byId = listSnapshot != null && typeof listSnapshot.byId === 'object' && listSnapshot.byId !== null
+    ? listSnapshot.byId
+    : null
+  var current = typeof uiCurrentKey === 'string' && uiCurrentKey !== '' ? uiCurrentKey : null
+
+  var rowHasMainView = function (row) {
+    return row != null && row.retainedBy != null && (row.retainedBy.mainView || 0) > 0
+  }
+
+  // Official rule: the current session while the main view retains it.
+  if (current !== null && byId != null && rowHasMainView(byId[current])) return current
+  // Otherwise whichever session the main view retains (rows carry their own id).
+  if (byId != null) {
+    for (var key in byId) {
+      var candidate = byId[key]
+      if (rowHasMainView(candidate)) {
+        return typeof candidate.id === 'string' && candidate.id !== '' ? candidate.id : key
+      }
+    }
+  }
+  // No main-view signal yet (startup timing): trust the tracked current.
+  if (current !== null) return current
+  // A legacy list `current` field, if some generation exposes one.
+  if (listSnapshot != null && typeof listSnapshot.current === 'string' && listSnapshot.current !== '') return listSnapshot.current
+  // Last resort: exactly one open session IS the target.
+  if (byId != null) {
+    var only = null
+    var count = 0
+    for (var single in byId) { only = single; count += 1 }
+    if (count === 1 && only !== null) {
+      var sole = byId[only]
+      return sole != null && typeof sole.id === 'string' && sole.id !== '' ? sole.id : only
+    }
+  }
+  return null
+}
+
+/**
+ * Structural equality for sanitized built-in scheme lists (gate confirmation
+ * + store adoption, mirroring presetsEqual).
+ * @param {Array} a - first list.
+ * @param {Array} b - second list.
+ * @returns {boolean} whether both lists hold the same schemes in order.
+ */
+function builtinSchemesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (var i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id) return false
+    if (!bindingsEqual(a[i], b[i])) return false
+  }
+  return true
+}
+
 /** Test hooks extracted by test/engine.test.mjs (plain consts, browser-harmless). */
 var __COMPOSER_KEYS_TEST_HOOKS__ = {
   MODIFIER_KEYS: MODIFIER_KEYS,
@@ -303,6 +527,14 @@ var __COMPOSER_KEYS_TEST_HOOKS__ = {
   isPristineDefaults: isPristineDefaults,
   moveGesture: moveGesture,
   sanitizeBindings: sanitizeBindings,
+  sanitizeCustomPresets: sanitizeCustomPresets,
+  sanitizeBuiltinSchemes: sanitizeBuiltinSchemes,
+  resolveBuiltinTriple: resolveBuiltinTriple,
+  matchActiveScheme: matchActiveScheme,
+  resolveCurrentSessionId: resolveCurrentSessionId,
+  builtinSchemesEqual: builtinSchemesEqual,
+  presetsEqual: presetsEqual,
+  MAX_CUSTOM_PRESETS: MAX_CUSTOM_PRESETS,
   bindingsEqual: bindingsEqual,
   cloneBindings: cloneBindings,
   prettifyBinding: prettifyBinding,
@@ -377,16 +609,6 @@ window.__ModuleLoader__.load({
     var STYLE_ATTRIBUTE = 'data-dsh-composer-keys-style'
     var PANEL_ATTRIBUTE = 'data-dsh-composer-keys-panel'
 
-    var DEFAULTS = Object.freeze({
-      send: Object.freeze(['enter', 'ctrl+enter']),
-      newline: Object.freeze(['shift+enter']),
-      interrupt: Object.freeze([]),
-    })
-    var PRESETS = [
-      { id: 'native', bindings: { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: [] } },
-      { id: 'chat', bindings: { send: ['ctrl+enter'], newline: ['enter', 'shift+enter'], interrupt: [] } },
-    ]
-
     var LOCALES = {
       en: {
         'row.title': 'Composer keys',
@@ -413,7 +635,10 @@ window.__ModuleLoader__.load({
         'preset.label': 'Presets:',
         'preset.native': 'DSH native',
         'preset.chat': 'Chat style',
-        reset: 'Reset to defaults',
+        'preset.add': '+ Add custom preset',
+        'preset.custom': 'Custom',
+        'preset.delete': 'Delete preset',
+        'preset.full': 'Up to 3 custom presets',
         'note.line1': 'While the agent is busy, queue-vs-steer follows the native “Busy Enter behavior” setting uniformly for EVERY bound send key. Only the untouched default bindings stay fully native (Ctrl/Cmd+Enter keeps its opposite-behavior trait in that pristine state).',
         'note.line2': 'This plugin only assigns which keys trigger send or newline. IME composition is never interrupted; other inputs (approval panels, rename boxes) are untouched.',
       },
@@ -442,7 +667,10 @@ window.__ModuleLoader__.load({
         'preset.label': '快速预设:',
         'preset.native': 'DSH 原生',
         'preset.chat': '微信风格',
-        reset: '重置为默认',
+        'preset.add': '+ 添加自定义预设',
+        'preset.custom': '自定义',
+        'preset.delete': '删除预设',
+        'preset.full': '最多保存 3 个自定义预设',
         'note.line1': '智能体忙碌时，发送是排队还是转向统一由 DSH 原生设置「繁忙时 Enter 键行为」决定——对所有已绑定的发送键一视同仁。仅当键位保持出厂默认时插件完全不介入（此时 Ctrl/Cmd+Enter 保留原生“另一行为”特性）。',
         'note.line2': '本插件只分配哪个键触发发送或换行。中文输入法选字中的 Enter 不会被拦截；审批面板等其他输入框不受影响。',
       },
@@ -476,6 +704,10 @@ window.__ModuleLoader__.load({
       '.ck-presets-label{font-size:12px;color:var(--dsw-alias-label-secondary,#646a73);margin-right:2px;}',
       '.ck-preset{border:1px solid var(--dsw-alias-border-l2,#dee0e3);background:transparent;color:var(--dsw-alias-label-primary,#1f2329);border-radius:999px;padding:2px 10px;font-size:12px;cursor:pointer;}',
       '.ck-preset:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));}',
+      '.ck-preset[disabled]{opacity:.5;cursor:not-allowed;}',
+      '.ck-preset[disabled]:hover{background:transparent;}',
+      '.ck-preset-del{margin-left:6px;padding:0 3px;border:none;background:transparent;color:var(--dsw-alias-label-tertiary,#8f959e);font-size:12px;line-height:1;cursor:pointer;border-radius:4px;}',
+      '.ck-preset-del:hover{color:var(--dsw-alias-label-primary,#1f2329);background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.08));}',
       '.ck-note{font-size:12px;color:var(--dsw-alias-label-tertiary,#8f959e);line-height:1.6;margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb);white-space:pre-line;}',
     ].join('\n')
 
@@ -513,14 +745,20 @@ window.__ModuleLoader__.load({
 
     // ── Keyboard engine ──────────────────────────────────────────────────────
 
-    /** Whether an element is the main chat composer input. */
+    /** Whether an element sits in the main chat composer input. */
     function isComposerInput(target) {
       if (!target || typeof target.closest !== 'function') return false
       if (target.closest('[data-input-scroll]') == null) return false
       // DSH ≤0.1.4: HTMLTextAreaElement; DSH ≥0.1.5: Lexical contentEditable div.
       if (target instanceof HTMLTextAreaElement) return true
-      if (target.getAttribute && target.getAttribute('data-composer-input') === 'true') return true
-      if (target.contentEditable === 'true') return true
+      // Climb: a caret inside a child span makes event.target that span, whose
+      // own contentEditable reads 'inherit' — isContentEditable propagates.
+      var node = target
+      while (node != null) {
+        if (node.isContentEditable === true) return true
+        if (node.getAttribute && node.getAttribute('data-composer-input') === 'true') return true
+        node = node.parentElement
+      }
       return false
     }
 
@@ -545,8 +783,13 @@ window.__ModuleLoader__.load({
         if (isPristineDefaults(bindings, DEFAULTS)) return
 
         if (action === 'newline') {
-          // Never let a failed custom newline fall through as native Enter:
-          // that could SEND a draft the user only meant to edit.
+          // Shift+Enter is the composer's native newline chord (DSH treats it
+          // as an unconditional line break): pass it through untouched so the
+          // DEFAULT chord can never be swallowed by a failed programmatic
+          // insert, in pristine or customized states alike.
+          if (gesture === 'shift+enter') return
+          // Custom chord (e.g. Enter-as-newline): never fall through — the
+          // native Enter would SEND a draft the user only meant to edit.
           event.preventDefault()
           event.stopImmediatePropagation()
           if (!insertNewline(target)) {
@@ -579,17 +822,35 @@ window.__ModuleLoader__.load({
       var onKeyDown = function (event) {
         if (event.isTrusted !== true) return
         if (event.isComposing === true || event.keyCode === 229) return
-        var target = event.target
-        if (target instanceof Element && target.closest(YIELD_SELECTOR) !== null) return
+        // Ours only — match the interrupt chord FIRST so every other keypress
+        // stays invisible (a bound interrupt also implies non-pristine, which
+        // made the old pristine short-circuit redundant here).
         var bindings = store.getSnapshot()
-        if (isPristineDefaults(bindings, DEFAULTS)) return
         var gesture = normalizeEventGesture(event)
         if (!gestureMatchesList(bindings.interrupt, gesture)) return
-        if (onInterrupt() !== true) return // busy gate failed: stay hands-off
+        var target = event.target
+        if (target instanceof Element && target.closest(YIELD_SELECTOR) !== null) {
+          console.info('[composer-keys] interrupt skipped: dialog/menu/panel is open (yield)')
+          return
+        }
+        var outcome = onInterrupt()
+        if (outcome !== true) {
+          // The callback explains itself (idle gate, data source, resolver…)
+          // instead of failing silently.
+          console.info('[composer-keys] interrupt skipped:', outcome)
+          return
+        }
+        console.info('[composer-keys] interrupt fired')
         event.preventDefault()
         event.stopImmediatePropagation()
       }
       window.addEventListener('keydown', onKeyDown, true)
+      // Registration proof: if this line never appears after a reload, the
+      // engine did not install (or the browser still runs a stale bundle).
+      console.info(
+        '[composer-keys] page-wide interrupt engine installed; store interrupt chord(s) at boot:',
+        JSON.stringify(store.getSnapshot().interrupt),
+      )
       return function () {
         window.removeEventListener('keydown', onKeyDown, true)
       }
@@ -632,7 +893,14 @@ window.__ModuleLoader__.load({
       // Lexical copy would create a different identity). The vendored build
       // retains the command's type label. Keep this private-API bridge guarded:
       // if it changes, fail closed instead of editing DOM behind Lexical's back.
-      var editor = target.__lexicalEditor
+      // __lexicalEditor lives on the contentEditable ROOT; with the caret in a
+      // child span, event.target is that span — so climb to the root first.
+      var node = target
+      var editor = null
+      while (node != null) {
+        if (node.__lexicalEditor) { editor = node.__lexicalEditor; break }
+        node = node.parentElement
+      }
       if (editor) {
         try {
           var command = null
@@ -641,10 +909,24 @@ window.__ModuleLoader__.load({
               if (key && key.type === 'INSERT_LINE_BREAK_COMMAND') command = key
             })
           }
-          return command !== null && typeof editor.dispatchCommand === 'function'
-            && editor.dispatchCommand(command, false) === true
-        } catch (error) { return false }
+          if (command !== null && typeof editor.dispatchCommand === 'function'
+            && editor.dispatchCommand(command, false) === true) {
+            return true
+          }
+        } catch (error) { /* fall through */ }
       }
+
+      // Replay a synthetic Shift+Enter through the same untrusted-event
+      // pipeline the (working) send replay uses: the composer's own keydown
+      // handler resolves it to its native newline branch, and this plugin's
+      // capture listener ignores untrusted events, so no loop can form.
+      try {
+        target.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', bubbles: true, cancelable: true, composed: true,
+          shiftKey: true, ctrlKey: false, metaKey: false, altKey: false,
+        }))
+        return true
+      } catch (error) { /* fall through */ }
 
       // Legacy textarea / plain contentEditable only. execCommand's return
       // value is NOT evidence of an edit reaching a Lexical state transaction.
@@ -672,7 +954,7 @@ window.__ModuleLoader__.load({
 
     // ── Floating panel (single React root over the document body) ───────────
 
-    function createPanelController(store, writeBindings, t) {
+    function createPanelController(store, presetStore, builtinStore, writeBindings, writePresets, writeBuiltinSchemes, t) {
       var host = null
       var root = null
       var openState = false
@@ -692,7 +974,11 @@ window.__ModuleLoader__.load({
         root.render(createElement(Panel, {
           open: openState,
           store: store,
+          presetStore: presetStore,
+          builtinStore: builtinStore,
           writeBindings: writeBindings,
+          writePresets: writePresets,
+          writeBuiltinSchemes: writeBuiltinSchemes,
           t: t,
           onClose: function () {
             openState = false
@@ -734,6 +1020,55 @@ window.__ModuleLoader__.load({
       var recordingState = useState(null)
       var recording = recordingState[0]
       var setRecording = recordingState[1]
+      // Saved custom presets mirror their store; every edit applies immediately.
+      var presetsState = useState(function () { return sanitizeCustomPresets(props.presetStore.getSnapshot()) })
+      var presets = presetsState[0]
+      var setPresets = presetsState[1]
+
+      /**
+       * Channel edits (recording / chip removal) belong to the scheme in use:
+       * derive that scheme from the PRE-edit live triple, commit the edit, and
+       * write it back into the scheme's stored triple — so a recorded key
+       * survives preset round-trips, while each scheme keeps its own values
+       * isolated ("打断随预设切换 + 各方案隔离"). Freestyle bindings (matching
+       * no scheme) stay live-only until a preset is clicked.
+       */
+      var editBindings = function (nextTriple) {
+        var clean = sanitizeBindings(nextTriple)
+        var active = matchActiveScheme(
+          props.store.getSnapshot(),
+          props.builtinStore.getSnapshot(),
+          props.presetStore.getSnapshot(),
+        )
+        props.writeBindings(clean)
+        if (active === 'native' || active === 'chat') {
+          var schemes = props.builtinStore.getSnapshot()
+          var updated = []
+          var found = false
+          for (var i = 0; i < schemes.length; i += 1) {
+            if (schemes[i].id !== active) { updated.push(schemes[i]); continue }
+            found = true
+            updated.push({ id: active, send: clean.send.slice(), newline: clean.newline.slice(), interrupt: clean.interrupt.slice() })
+          }
+          if (!found) updated.push({ id: active, send: clean.send.slice(), newline: clean.newline.slice(), interrupt: clean.interrupt.slice() })
+          props.writeBuiltinSchemes(updated)
+        } else if (active !== null && active !== undefined) {
+          var customs = props.presetStore.getSnapshot()
+          var nextCustoms = []
+          var saved = false
+          for (var j = 0; j < customs.length; j += 1) {
+            if (customs[j].name !== active) { nextCustoms.push(customs[j]); continue }
+            saved = true
+            nextCustoms.push({
+              name: active,
+              send: clean.send.slice(),
+              newline: clean.newline.slice(),
+              interrupt: clean.interrupt.slice(),
+            })
+          }
+          if (saved) props.writePresets(nextCustoms)
+        }
+      }
 
       // Follow external changes (another surface wrote the settings document).
       useEffect(function () {
@@ -743,6 +1078,14 @@ window.__ModuleLoader__.load({
           if (typeof unsubscribe === 'function') unsubscribe()
         }
       }, [props.store])
+
+      useEffect(function () {
+        var sync = function () { setPresets(sanitizeCustomPresets(props.presetStore.getSnapshot())) }
+        var unsubscribe = props.presetStore.subscribe(sync)
+        return function () {
+          if (typeof unsubscribe === 'function') unsubscribe()
+        }
+      }, [props.presetStore])
 
       // Recorder: capture-phase interception while active.
       useEffect(function () {
@@ -759,7 +1102,7 @@ window.__ModuleLoader__.load({
           var gesture = normalizeEventGesture(event)
           if (gesture === '') return // pure modifier press: keep waiting
           var next = moveGesture(props.store.getSnapshot(), gesture, recording)
-          props.writeBindings(next)
+          editBindings(next)
           setBindings(cloneBindings(next))
           setRecording(null)
         }
@@ -776,6 +1119,30 @@ window.__ModuleLoader__.load({
         setRecording(null)
       }
 
+      // Capture the CURRENT bindings as a named custom preset (≤ 3 saved).
+      var addPreset = function () {
+        if (presets.length >= MAX_CUSTOM_PRESETS) return
+        var base = t('preset.custom')
+        var names = presets.map(function (entry) { return entry.name })
+        var suffix = 1
+        while (names.indexOf(base + ' ' + suffix) !== -1) suffix += 1
+        var created = {
+          name: base + ' ' + suffix,
+          send: bindings.send.slice(),
+          newline: bindings.newline.slice(),
+          interrupt: bindings.interrupt.slice(),
+        }
+        var next = presets.concat([created])
+        props.writePresets(next)
+        setPresets(next)
+      }
+
+      var dropPreset = function (name) {
+        var next = presets.filter(function (entry) { return entry.name !== name })
+        props.writePresets(next)
+        setPresets(next)
+      }
+
       return createElement('div', {
         className: 'ck-overlay',
         onMouseDown: function (event) {
@@ -786,9 +1153,9 @@ window.__ModuleLoader__.load({
           createElement('div', { className: 'ck-head' },
             createElement('div', { className: 'ck-title' }, t('panel.title')),
             createElement('button', { type: 'button', className: 'ck-x', 'aria-label': t('panel.close'), onClick: props.onClose }, '×')),
-          createActionBlock(t, 'send', snapshot, recording, setRecording, props.writeBindings, setBindings),
-          createActionBlock(t, 'newline', snapshot, recording, setRecording, props.writeBindings, setBindings),
-          createActionBlock(t, 'interrupt', snapshot, recording, setRecording, props.writeBindings, setBindings),
+          createActionBlock(t, 'send', snapshot, recording, setRecording, editBindings, setBindings),
+          createActionBlock(t, 'newline', snapshot, recording, setRecording, editBindings, setBindings),
+          createActionBlock(t, 'interrupt', snapshot, recording, setRecording, editBindings, setBindings),
           createElement('div', { className: 'ck-foot' },
             createElement('span', { className: 'ck-presets-label' }, t('preset.label')),
             PRESETS.map(function (preset) {
@@ -796,14 +1163,55 @@ window.__ModuleLoader__.load({
                 key: preset.id,
                 type: 'button',
                 className: 'ck-preset',
-                onClick: function () { applyNow(preset.bindings) },
+                onClick: function () {
+                  // Isolated scheme switch: load THIS scheme's full triple
+                  // (its own send/newline/interrupt override when persisted).
+                  applyNow(resolveBuiltinTriple(preset.id, props.builtinStore.getSnapshot()))
+                },
               }, t('preset.' + preset.id))
+            }),
+            presets.map(function (preset, index) {
+              return createElement('button', {
+                key: 'custom-' + index,
+                type: 'button',
+                className: 'ck-preset ck-preset-custom',
+                onClick: function () {
+                  // Isolated scheme switch: a custom preset loads its OWN
+                  // captured triple — interrupt follows the preset too, and
+                  // no value is inherited from the previously active scheme.
+                  applyNow({
+                    send: preset.send.slice(),
+                    newline: preset.newline.slice(),
+                    interrupt: preset.interrupt.slice(),
+                  })
+                },
+              },
+                preset.name,
+                createElement('span', {
+                  className: 'ck-preset-del',
+                  role: 'button',
+                  tabIndex: 0,
+                  'aria-label': t('preset.delete') + ': ' + preset.name,
+                  onClick: function (event) {
+                    event.stopPropagation()
+                    dropPreset(preset.name)
+                  },
+                  onKeyDown: function (event) {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      dropPreset(preset.name)
+                    }
+                  },
+                }, '×'))
             }),
             createElement('button', {
               type: 'button',
-              className: 'ck-preset',
-              onClick: function () { applyNow(DEFAULTS) },
-            }, t('reset'))),
+              className: 'ck-preset ck-preset-add',
+              disabled: presets.length >= MAX_CUSTOM_PRESETS,
+              title: presets.length >= MAX_CUSTOM_PRESETS ? t('preset.full') : undefined,
+              onClick: addPreset,
+            }, t('preset.add'))),
           createElement('div', { className: 'ck-note' }, t('note.line1') + '\n' + t('note.line2'))))
     }
 
@@ -907,10 +1315,16 @@ window.__ModuleLoader__.load({
      * without declaration — `cannot get property X without inject`):
      * - locale: dictionary registration (`ctx.locale.register`);
      * - slots: Settings row + composer button registration;
-     * - settingsScope: durable key-binding persistence;
      * - sessions: interrupt action targets the currently open session.
+     *
+     * Deliberately NOT listed: the settings surface. DSH ≤0.1.6 called it
+     * `settingsScope`, 0.1.7 renamed it to `configForms` — listing either
+     * parks the whole plugin at boot (`pending: waiting for service: ...`).
+     * Both are instead taken through optional nested injects inside apply,
+     * so a deployment with neither degrades to session-local bindings while
+     * the keyboard engine keeps running.
      */
-    var CLIENT_INJECT = ['locale', 'slots', 'settingsScope', 'sessions']
+    var CLIENT_INJECT = ['locale', 'slots', 'sessions']
 
     function apply(ctx) {
       // Dictionaries first; later surfaces bind through the locale seat.
@@ -920,12 +1334,10 @@ window.__ModuleLoader__.load({
       var t = makeTranslate(ctx)
 
       // Durable preference scope (same channel as the native busy-Enter row).
+      // ≤0.1.6: settingsScope.bind({ namespace }); 0.1.7: configForms.get(entryId).
+      // Both surfaces share one scope shape (getSnapshot/set/subscribe), and
+      // both arrive through optional nested injects so neither can park apply.
       var scope = null
-      try {
-        if (ctx.settingsScope && typeof ctx.settingsScope.bind === 'function') {
-          scope = ctx.settingsScope.bind({ namespace: NS })
-        }
-      } catch (error) { console.warn('[composer-keys] settingsScope.bind failed', error); scope = null }
 
       function readScope() {
         try {
@@ -938,42 +1350,253 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // Reactive source shared by the engine, both slot entries, and the panel.
+      /** Raw settings section: undefined while no scope or namespace unserved. */
+      function readSection() {
+        try {
+          return scope !== null && typeof scope.getSnapshot === 'function'
+            ? scope.getSnapshot().value
+            : undefined
+        } catch (error) { return undefined }
+      }
+
+      // Reactive sources shared by the engine, both slot entries, and the panel.
       var store = createSnapshotStore(readScope())
-      if (scope !== null && typeof scope.subscribe === 'function') {
-        scope.subscribe(function () {
-          var next = readScope()
-          if (!bindingsEqual(store.getSnapshot(), next)) store.set(next)
+      var presetStore = createSnapshotStore(sanitizeCustomPresets((readSection() || {}).presets))
+      var builtinStore = createSnapshotStore(sanitizeBuiltinSchemes((readSection() || {}).builtinSchemes))
+
+      /**
+       * Write gates. While a local write is unconfirmed, any scope view that
+       * CONTRADICTS it — a partial echo of an in-flight write, a stale
+       * projection served before the Host applied the override, or the
+       * recovery view of a rejected write — must not clobber the optimistic
+       * state (that is the "preset snaps back to native" bug). A matching
+       * echo confirms and clears the gate; a rejected write clears it and
+       * immediately re-adopts the Host's truth.
+       */
+      var pendingBindings = null
+      var pendingPresets = null
+      var pendingBuiltins = null
+
+      function adoptScopeView() {
+        var section = readSection()
+        var hasSection = section !== undefined && section !== null && typeof section === 'object'
+
+        var nextBindings = hasSection ? sanitizeBindings(section) : cloneBindings(DEFAULTS)
+        if (pendingBindings !== null) {
+          if (hasSection && bindingsEqual(nextBindings, pendingBindings)) pendingBindings = null
+        } else if (!bindingsEqual(store.getSnapshot(), nextBindings)) {
+          logInterruptChange(store.getSnapshot().interrupt, nextBindings.interrupt)
+          store.set(nextBindings)
+        }
+
+        var nextPresets = hasSection ? sanitizeCustomPresets(section.presets) : []
+        if (pendingPresets !== null) {
+          if (presetsEqual(nextPresets, pendingPresets)) pendingPresets = null
+        } else if (!presetsEqual(presetStore.getSnapshot(), nextPresets)) {
+          presetStore.set(nextPresets)
+        }
+
+        var nextBuiltins = hasSection ? sanitizeBuiltinSchemes(section.builtinSchemes) : []
+        if (pendingBuiltins !== null) {
+          if (builtinSchemesEqual(nextBuiltins, pendingBuiltins)) pendingBuiltins = null
+        } else if (!builtinSchemesEqual(builtinStore.getSnapshot(), nextBuiltins)) {
+          builtinStore.set(nextBuiltins)
+        }
+      }
+
+      /** Subscribe a freshly-bound scope and adopt whatever it already holds. */
+      function attachScope() {
+        if (scope === null || typeof scope.subscribe !== 'function') return
+        scope.subscribe(adoptScopeView)
+        adoptScopeView()
+      }
+      attachScope()
+
+      // Legacy surface (≤0.1.6).
+      try {
+        ctx.inject(['settingsScope'], function (sctx) {
+          if (scope !== null) return
+          try {
+            if (sctx.settingsScope && typeof sctx.settingsScope.bind === 'function') {
+              scope = sctx.settingsScope.bind({ namespace: NS })
+              attachScope()
+            }
+          } catch (error) { console.warn('[composer-keys] settingsScope.bind failed', error) }
         })
+      } catch (error) { console.warn('[composer-keys] settingsScope inject failed', error) }
+
+      // 0.1.7 surface: host entry id `composer-keys` doubles as its settings
+      // namespace in the configForms mirror.
+      try {
+        ctx.inject(['configForms'], function (sctx) {
+          if (scope !== null) return
+          try {
+            if (sctx.configForms && typeof sctx.configForms.get === 'function') {
+              scope = sctx.configForms.get(NS)
+              attachScope()
+            }
+          } catch (error) { console.warn('[composer-keys] configForms.get failed', error) }
+        })
+      } catch (error) { console.warn('[composer-keys] configForms inject failed', error) }
+
+      // Merged live session status (host baseline + api-session/status events).
+      // The interrupt busy gate reads it; optional nested inject, so a
+      // deployment without uiSession only loses the live layer and falls back
+      // to the baseline row — never the plugin itself.
+      var uiSessionService = null
+      try {
+        ctx.inject(['uiSession'], function (sctx) {
+          if (uiSessionService !== null) return
+          try {
+            if (sctx.uiSession != null) uiSessionService = sctx.uiSession
+          } catch (error) { console.warn('[composer-keys] uiSession bind failed', error) }
+        })
+      } catch (error) { console.warn('[composer-keys] uiSession inject failed', error) }
+
+      /**
+       * Persist section fields through ONE atomic mutation when the surface
+       * offers it (0.1.7 ConfigFormController.mutate — a single revision, a
+       * single echo, no partial-view flicker) and per-field sets otherwise.
+       * @param {Array<{field: string, value: *}>} pairs - section fields.
+       * @returns {Promise<boolean>} whether the Host accepted every write.
+       */
+      function persistSections(pairs) {
+        if (scope === null) return Promise.resolve(true)
+        try {
+          if (typeof scope.mutate === 'function') {
+            var ops = pairs.map(function (pair) { return { op: 'set', path: [pair.field], value: pair.value } })
+            var mutation = scope.mutate(ops)
+            return mutation && typeof mutation.then === 'function' ? mutation : Promise.resolve(true)
+          }
+          if (typeof scope.set !== 'function') return Promise.resolve(false)
+          var attempts = pairs.map(function (pair) {
+            try {
+              var attempt = scope.set(pair.field, pair.value)
+              return attempt && typeof attempt.then === 'function' ? attempt : true
+            } catch (error) { return false }
+          })
+          return Promise.all(attempts).then(function (flags) {
+            return flags.every(function (flag) { return flag !== false })
+          })
+        } catch (error) {
+          return Promise.resolve(false)
+        }
+      }
+
+      /** One line whenever the interrupt channel's bound chords change. */
+      function logInterruptChange(before, after) {
+        var prev = Array.isArray(before) ? before : []
+        var next = Array.isArray(after) ? after : []
+        if (listEqual(prev, next)) return
+        console.info('[composer-keys] interrupt channel →', next.length ? next.join(', ') : '(cleared)')
       }
 
       function writeBindings(next) {
         var clean = sanitizeBindings(next)
+        var previousInterrupt = store.getSnapshot().interrupt
         store.set(clean)
-        if (scope !== null && typeof scope.set === 'function') {
-          try { void scope.set('send', clean.send.slice()) } catch (error) { /* read-only surface: session-local only */ }
-          try { void scope.set('newline', clean.newline.slice()) } catch (error) { /* read-only surface: session-local only */ }
-        }
+        logInterruptChange(previousInterrupt, clean.interrupt)
+        if (scope === null || (typeof scope.mutate !== 'function' && typeof scope.set !== 'function')) return
+        pendingBindings = clean
+        persistSections([
+          { field: 'send', value: clean.send.slice() },
+          { field: 'newline', value: clean.newline.slice() },
+          { field: 'interrupt', value: clean.interrupt.slice() },
+        ]).then(function (accepted) {
+          if (accepted === false) {
+            console.warn('[composer-keys] Host rejected the key-binding write — keeping the session-local state')
+            if (pendingBindings === clean) { pendingBindings = null; adoptScopeView() }
+          }
+        }, function () {
+          if (pendingBindings === clean) { pendingBindings = null; adoptScopeView() }
+        })
+      }
+
+      function writePresets(next) {
+        var clean = sanitizeCustomPresets(next)
+        presetStore.set(clean)
+        if (scope === null || (typeof scope.mutate !== 'function' && typeof scope.set !== 'function')) return
+        pendingPresets = clean
+        persistSections([{ field: 'presets', value: clean }]).then(function (accepted) {
+          if (accepted === false) {
+            console.warn('[composer-keys] Host rejected the preset write — keeping the session-local state')
+            if (pendingPresets === clean) { pendingPresets = null; adoptScopeView() }
+          }
+        }, function () {
+          if (pendingPresets === clean) { pendingPresets = null; adoptScopeView() }
+        })
+      }
+
+      /**
+       * Persist the built-in scheme overrides (the three-channel triples the
+       * user edited while a builtin scheme was active). Same single-field,
+       * gated pattern as writePresets.
+       * @param {Array} next - the sanitized builtinSchemes list.
+       */
+      function writeBuiltinSchemes(next) {
+        var clean = sanitizeBuiltinSchemes(next)
+        builtinStore.set(clean)
+        if (scope === null || (typeof scope.mutate !== 'function' && typeof scope.set !== 'function')) return
+        pendingBuiltins = clean
+        persistSections([{ field: 'builtinSchemes', value: clean }]).then(function (accepted) {
+          if (accepted === false) {
+            console.warn('[composer-keys] Host rejected the scheme write — keeping the session-local state')
+            if (pendingBuiltins === clean) { pendingBuiltins = null; adoptScopeView() }
+          }
+        }, function () {
+          if (pendingBuiltins === clean) { pendingBuiltins = null; adoptScopeView() }
+        })
       }
 
       /**
        * Interrupt action: resolve the CURRENTLY OPEN session through the
        * sessions runtime and invoke the same cancel face the native stop
-       * button uses (`scope(id).get('conversation').cancel()`), so subagent
-       * address routing and error display behave identically. Returns true
-       * only when a cancel was actually dispatched — the page-wide engine
-       * swallows the key event solely on that signal.
+       * button uses, so subagent address routing and error display behave
+       * identically. Returns true only when a cancel was actually dispatched;
+       * otherwise a short reason code the engine logs — a dead key press must
+       * explain itself instead of failing silently.
+       * @returns {true|string} dispatch verdict or the skip reason.
        */
       function interruptCurrentSession() {
         try {
           var sessions = ctx.sessions
-          if (sessions == null || sessions.list == null || typeof sessions.list.getSnapshot !== 'function') return false
+          if (sessions == null || sessions.list == null || typeof sessions.list.getSnapshot !== 'function') return 'sessions-unavailable'
           var snapshot = sessions.list.getSnapshot()
-          var id = snapshot.current
-          if (id === undefined || id === null) return false
-          var summary = snapshot.byId != null ? snapshot.byId[id] : undefined
+          // 0.1.7's list snapshot has NO `current` field — resolve the target
+          // the way the official UI does: uiSession.current (tracked) plus
+          // main-view retention, with legacy/single-session fallbacks.
+          var uiCurrentKey
+          try {
+            uiCurrentKey = uiSessionService != null && uiSessionService.current != null && uiSessionService.current.value != null
+              ? uiSessionService.current.value.key
+              : undefined
+          } catch (error) { uiCurrentKey = undefined }
+          var id = resolveCurrentSessionId(snapshot, uiCurrentKey)
+          if (id === null) {
+            var openCount = snapshot != null && snapshot.byId != null && typeof snapshot.byId === 'object'
+              ? Object.keys(snapshot.byId).length
+              : 0
+            return 'no-current-session (open: ' + String(openCount) + ')'
+          }
           // Busy gate: an idle press stays hands-off (native Esc semantics win).
-          if (summary == null || summary.running !== true) return false
+          // DATA SOURCE MATTERS: the raw list row only carries the HOST
+          // BASELINE of `running`; live start/stop transitions arrive as
+          // status events into uiSession.sessionStatus (the merged view the
+          // official UI reads). Reading the baseline alone left the gate
+          // closed while a task was actually running — interrupt then never
+          // fired. Prefer the merged entry; fall back to the baseline row.
+          var summary = snapshot.byId != null ? snapshot.byId[id] : undefined
+          var running = undefined
+          try {
+            if (uiSessionService != null && uiSessionService.sessionStatus != null
+              && typeof uiSessionService.sessionStatus.getSnapshot === 'function') {
+              var status = uiSessionService.sessionStatus.getSnapshot()
+              var entry = status != null && typeof status.get === 'function' ? status.get(id) : undefined
+              if (entry != null && typeof entry.running === 'boolean') running = entry.running
+            }
+          } catch (error) { /* fall through to the baseline row */ }
+          if (running === undefined) running = summary != null ? summary.running : undefined
+          if (running !== true) return 'not-running (idle presses stay hands-off by design)'
           var conversation = undefined
           if (typeof sessions.scope === 'function') {
             var scoped = sessions.scope(id)
@@ -985,10 +1608,17 @@ window.__ModuleLoader__.load({
             var binding = sessions.binding(id)
             if (binding != null) conversation = binding.session
           }
-          if (conversation == null || typeof conversation.cancel !== 'function') return false
-          void conversation.cancel().catch(noop)
+          if (conversation == null || typeof conversation.cancel !== 'function') return 'conversation-unavailable'
+          var outcome = conversation.cancel()
+          if (outcome != null && typeof outcome.then === 'function') {
+            outcome.catch(function (error) {
+              console.warn('[composer-keys] interrupt cancel failed', error)
+            })
+          }
           return true
-        } catch (error) { return false }
+        } catch (error) {
+          return 'error: ' + (error != null && error.message ? error.message : String(error))
+        }
       }
 
       // Keyboard engine: window-capture keydown, scoped to the composer box.
@@ -998,7 +1628,7 @@ window.__ModuleLoader__.load({
       try { disposeInterrupt = installInterruptEngine(store, interruptCurrentSession) } catch (error) { /* stay inert rather than break the page */ }
 
       // Panel singleton lifecycle (created lazily on first open).
-      var panel = createPanelController(store, writeBindings, t)
+      var panel = createPanelController(store, presetStore, builtinStore, writeBindings, writePresets, writeBuiltinSchemes, t)
 
       // Entry A: Settings → General row.
       try {

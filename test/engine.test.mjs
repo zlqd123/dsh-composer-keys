@@ -32,6 +32,14 @@ const {
   isPristineDefaults,
   moveGesture,
   sanitizeBindings,
+  sanitizeCustomPresets,
+  sanitizeBuiltinSchemes,
+  resolveBuiltinTriple,
+  matchActiveScheme,
+  resolveCurrentSessionId,
+  builtinSchemesEqual,
+  presetsEqual,
+  MAX_CUSTOM_PRESETS,
   bindingsEqual,
   cloneBindings,
   prettifyBinding,
@@ -256,4 +264,181 @@ test('prettifyBinding: human-readable labels', () => {
   assert.equal(prettifyBinding('space'), 'Space')
   assert.equal(prettifyBinding('f4'), 'F4')
   assert.equal(prettifyBinding('escape'), 'Esc')
+})
+
+test('shift+enter rebound to send resolves as send (newline pass-through never claims it)', () => {
+  // A user who wants Shift+Enter to SUBMIT moves the gesture out of newline
+  // into send (the panel's moveGesture enforces mutual exclusion). Action
+  // resolution runs before the engine's newline-branch pass-through guard, so
+  // the guard can never swallow this binding: send wins and the engine takes
+  // its intercept branch → replaySubmit.
+  const bindings = { send: ['enter', 'ctrl+enter', 'shift+enter'], newline: [], interrupt: [] }
+  assert.equal(actionForGesture(bindings, 'shift+enter'), 'send')
+  assert.equal(gestureMatchesList(bindings.newline, 'shift+enter'), false, 'moved out of newline')
+  assert.equal(isPristineDefaults(bindings, NATIVE), false, 'customized → engine intercepts')
+})
+
+test('shift+enter left in newline resolves as newline (engine passes the default chord through)', () => {
+  assert.equal(actionForGesture(NATIVE, 'shift+enter'), 'newline')
+  assert.equal(actionForGesture(CHAT_STYLE, 'shift+enter'), 'newline')
+  assert.equal(isPristineDefaults(NATIVE, NATIVE), true, 'pristine → engine fully hands-off')
+})
+
+test('sanitizeCustomPresets: caps at three, drops malformed entries, trims and dedupes names', () => {
+  const mk = (name, overrides) => ({
+    name,
+    send: ['ctrl+enter'],
+    newline: ['enter'],
+    interrupt: [],
+    ...overrides,
+  })
+
+  // Not-an-array shapes collapse to an empty list.
+  assert.deepEqual(sanitizeCustomPresets(undefined), [])
+  assert.deepEqual(sanitizeCustomPresets('junk'), [])
+  assert.deepEqual(sanitizeCustomPresets({ name: 'x' }), [])
+
+  // Malformed entries (non-object, object without a usable name) are dropped.
+  assert.deepEqual(sanitizeCustomPresets([null, 42, ['nested'], { send: [] }, { name: '   ' }]), [])
+
+  // The third extra preset is the cap; a fourth never lands.
+  const capped = sanitizeCustomPresets([mk('one'), mk('two'), mk('three'), mk('four')])
+  assert.equal(capped.length, MAX_CUSTOM_PRESETS)
+  assert.deepEqual(capped.map((entry) => entry.name), ['one', 'two', 'three'])
+
+  // Names are trimmed; duplicates after trimming keep the FIRST occurrence.
+  const deduped = sanitizeCustomPresets([mk('  工作台  '), mk('工作台'), mk('第二')])
+  assert.deepEqual(deduped.map((entry) => entry.name), ['工作台', '第二'])
+
+  // Each preset's bindings are sanitized like ordinary bindings: non-string
+  // junk is dropped, non-array fields fall back to the shipped defaults.
+  const sanitized = sanitizeCustomPresets([
+    mk('mixed', { send: ['enter', 42, null], newline: 'not-an-array', interrupt: ['ctrl+alt+k'] }),
+  ])[0]
+  assert.deepEqual(sanitized.send, ['enter'])
+  assert.deepEqual(sanitized.newline, ['shift+enter'], 'non-array falls back to the shipped default')
+  assert.deepEqual(sanitized.interrupt, ['ctrl+alt+k'])
+})
+
+test('presetsEqual: structural comparison for write-gate confirmation', () => {
+  const mk = (name, overrides) => ({ name, send: ['ctrl+enter'], newline: ['enter'], interrupt: [], ...overrides })
+  const a = sanitizeCustomPresets([mk('one')])
+  const same = sanitizeCustomPresets([mk('one')])
+  const changed = sanitizeCustomPresets([mk('one', { send: ['shift+enter'] })])
+  const other = sanitizeCustomPresets([mk('two')])
+
+  assert.equal(presetsEqual(a, same), true)
+  assert.equal(presetsEqual(a, []), false, 'length mismatch')
+  assert.equal(presetsEqual(a, other), false, 'name mismatch')
+  assert.equal(presetsEqual(a, changed), false, 'bindings mismatch')
+  assert.equal(presetsEqual(undefined, []), false)
+})
+
+test('sanitizeBuiltinSchemes: only reserved ids survive, one entry each, triples sanitized', () => {
+  assert.deepEqual(sanitizeBuiltinSchemes(undefined), [])
+  assert.deepEqual(sanitizeBuiltinSchemes('junk'), [])
+  assert.deepEqual(sanitizeBuiltinSchemes([{ name: 'no-id' }, { id: 'evil' }]), [], 'unknown ids dropped')
+
+  const cleaned = sanitizeBuiltinSchemes([
+    { id: 'native', send: ['enter', 42], newline: 'nope', interrupt: [' ESCAPE '] },
+    { id: 'native', send: ['ctrl+s'], newline: [], interrupt: [] },
+    { id: 'chat', send: ['ctrl+enter'], newline: ['enter'], interrupt: ['escape'] },
+  ])
+  assert.deepEqual(cleaned.map((scheme) => scheme.id), ['native', 'chat'], 'first id wins, order kept')
+  assert.deepEqual(cleaned[0].send, ['enter'], 'junk entry dropped inside triple')
+  assert.deepEqual(cleaned[0].newline, ['shift+enter'], 'non-array falls back to the shipped default')
+  assert.deepEqual(cleaned[0].interrupt, ['escape'], 'trim/lowercase applies')
+})
+
+test('resolveBuiltinTriple: override wins wholesale, else the shipped template (isolated triple)', () => {
+  const override = sanitizeBuiltinSchemes([
+    { id: 'native', send: ['enter'], newline: ['shift+enter'], interrupt: ['escape'] },
+  ])
+
+  // Override replaces ALL THREE channels — never a value from another scheme.
+  const resolved = resolveBuiltinTriple('native', override)
+  assert.deepEqual(resolved, { send: ['enter'], newline: ['shift+enter'], interrupt: ['escape'] })
+
+  // Without an override the shipped template applies.
+  assert.deepEqual(resolveBuiltinTriple('native', []), NATIVE)
+  assert.deepEqual(resolveBuiltinTriple('chat', []), CHAT_STYLE)
+  assert.deepEqual(resolveBuiltinTriple('chat', override), CHAT_STYLE, 'other scheme untouched')
+
+  // Garbage ids and garbage lists fall back safely.
+  assert.deepEqual(resolveBuiltinTriple('unknown', override), NATIVE)
+  assert.deepEqual(resolveBuiltinTriple('native', 'junk'), NATIVE)
+
+  // The result is an independent copy.
+  resolved.send.push('alt+x')
+  assert.equal(override[0].send.includes('alt+x'), false)
+})
+
+test('matchActiveScheme: identifies the scheme a triple belongs to (customs first, overrides honored)', () => {
+  const empty = []
+  // Shipped templates match out of the box.
+  assert.equal(matchActiveScheme(NATIVE, empty, []), 'native')
+  assert.equal(matchActiveScheme(CHAT_STYLE, empty, []), 'chat')
+
+  // A recorded key still resolves via the persisted override — this keeps the
+  // edit→write-back chain alive across consecutive edits.
+  const nativeWithEsc = { send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: ['escape'] }
+  const overrides = sanitizeBuiltinSchemes([
+    { id: 'native', send: ['enter', 'ctrl+enter'], newline: ['shift+enter'], interrupt: ['escape'] },
+  ])
+  assert.equal(matchActiveScheme(nativeWithEsc, overrides, []), 'native', 'override-resolved match')
+  assert.equal(matchActiveScheme(nativeWithEsc, empty, []), null, 'without the override it is freestyle')
+
+  // An explicitly saved custom scheme wins over an identical builtin.
+  const custom = sanitizeCustomPresets([{ name: 'mine', ...NATIVE }])
+  assert.equal(matchActiveScheme(NATIVE, empty, custom), 'mine')
+
+  // Freestyle bindings match nothing.
+  assert.equal(matchActiveScheme({ send: ['ctrl+q'], newline: [], interrupt: [] }, empty, []), null)
+  assert.equal(matchActiveScheme(null, empty, []), null)
+})
+
+test('builtinSchemesEqual: id-aware structural comparison for the write gate', () => {
+  const a = sanitizeBuiltinSchemes([{ id: 'native', send: ['enter'], newline: [], interrupt: [] }])
+  const same = sanitizeBuiltinSchemes([{ id: 'native', send: ['enter'], newline: [], interrupt: [] }])
+  const otherId = sanitizeBuiltinSchemes([{ id: 'chat', send: ['enter'], newline: [], interrupt: [] }])
+  const otherTriple = sanitizeBuiltinSchemes([{ id: 'native', send: ['ctrl+enter'], newline: [], interrupt: [] }])
+
+  assert.equal(builtinSchemesEqual(a, same), true)
+  assert.equal(builtinSchemesEqual(a, []), false, 'length mismatch')
+  assert.equal(builtinSchemesEqual(a, otherId), false, 'id mismatch')
+  assert.equal(builtinSchemesEqual(a, otherTriple), false, 'triple mismatch')
+  assert.equal(builtinSchemesEqual(undefined, []), false)
+})
+
+test('resolveCurrentSessionId: official current-session resolution with every fallback', () => {
+  // Regression: 0.1.7's list snapshot has NO `current` field — the old
+  // `snapshot.current` read was always undefined, so interrupt never got a
+  // target ("interrupt skipped: no-current-session"). Resolution now mirrors
+  // uiSession.publishMain: tracked current + main-view retention, then
+  // legacy/single-session fallbacks.
+  const row = (id, mainView) => ({ id, retainedBy: { mainView } })
+
+  // Current retained by the main view → current (official rule).
+  const both = { byId: { a: row('a', 1), b: row('b', 0) } }
+  assert.equal(resolveCurrentSessionId(both, 'a'), 'a')
+  // Current NOT retained while another row is → the main-view row wins.
+  assert.equal(resolveCurrentSessionId(both, 'b'), 'a')
+
+  // No main-view signal yet (startup timing): trust the tracked current.
+  assert.equal(resolveCurrentSessionId({ byId: { a: row('a', 0) } }, 'a'), 'a')
+  assert.equal(resolveCurrentSessionId(undefined, 'a'), 'a', 'no snapshot at all')
+
+  // Legacy field, then exactly-one-open-session, then no target.
+  assert.equal(resolveCurrentSessionId({ current: 'legacy-9' }, undefined), 'legacy-9')
+  assert.equal(resolveCurrentSessionId({ byId: { only: row('only', 0) } }, undefined), 'only')
+  assert.equal(
+    resolveCurrentSessionId({ byId: { a: row('a', 0), b: row('b', 0) } }, undefined),
+    null,
+    'multiple open sessions with no signal resolve to no target',
+  )
+
+  // Hostile shapes never throw; the row's own id is preferred over its key.
+  assert.equal(resolveCurrentSessionId(null, undefined), null)
+  assert.equal(resolveCurrentSessionId({ byId: 'junk' }, ''), null)
+  assert.equal(resolveCurrentSessionId({ byId: { k: { id: 'real-id', retainedBy: { mainView: 2 } } } }, undefined), 'real-id')
 })
