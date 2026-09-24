@@ -54,6 +54,11 @@ jobs:
       - name: Publish
         run: |
           npm config delete //registry.npmjs.org/:_authToken || true
+          # Actually publish first (restored: commit f4783ce accidentally
+          # dropped this line, leaving verification that could only ever fail
+          # with E404 "publish did not land"). No `|| true` — a failed
+          # publish must fail the job.
+          npm publish
           # Verify the release tag version actually landed (skip on manual dispatch).
           VERSION_TO_CHECK="${GITHUB_REF_NAME#v}"
           if [ "$VERSION_TO_CHECK" = "main" ]; then VERSION_TO_CHECK=$(node -p "require('./package.json').version"); fi
