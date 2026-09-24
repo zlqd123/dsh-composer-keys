@@ -59,8 +59,20 @@ jobs:
           # with E404 "publish did not land"). No `|| true` — a failed
           # publish must fail the job.
           npm publish
-          # Verify the release tag version actually landed (skip on manual dispatch).
+          # Verify the release tag version actually landed. Poll instead of a
+          # single immediate view: the registry takes a little while to serve a
+          # fresh publish (npm itself says "may take a few minutes"), and one
+          # shot false-positived as "publish did not land" right after a
+          # successful publish.
           VERSION_TO_CHECK="${GITHUB_REF_NAME#v}"
           if [ "$VERSION_TO_CHECK" = "main" ]; then VERSION_TO_CHECK=$(node -p "require('./package.json').version"); fi
-          npm view "dsh-composer-keys@$VERSION_TO_CHECK" version --registry https://registry.npmjs.org \
-            && echo "PUBLISH OK" || { echo "::error::publish did not land"; exit 1; }
+          for i in $(seq 1 20); do
+            if npm view "dsh-composer-keys@$VERSION_TO_CHECK" version --registry https://registry.npmjs.org 2>/dev/null; then
+              echo "PUBLISH OK"
+              exit 0
+            fi
+            echo "not visible yet (attempt $i/20), retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::publish did not land"
+          exit 1
