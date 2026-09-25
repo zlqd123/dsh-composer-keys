@@ -16,9 +16,83 @@
  * settings service at all the optional nested inject never fires and the
  * browser half degrades to session-local bindings — the keyboard engine
  * never depended on this half.
+ *
+ * Schema resolution is dynamic (see loadSchema): the Loader imports this
+ * entry through the profile's node_modules, but a `link:`ed dev copy is
+ * realpath'd out of the profile tree by Node, so a static bare import of
+ * `@deepseek-ai/schemastery` is resolved from a directory with no
+ * node_modules at all and the entry dies as "failed to import" — the
+ * Loader never reports the underlying error.
  */
 
-import Schema from '@deepseek-ai/schemastery'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+/** Bare specifier of the schema library every DSH install keeps in reach. */
+const SCHEMATERY = '@deepseek-ai/schemastery'
+
+/** Read a Schema out of either an ESM namespace or a CJS exports object. */
+function schemaOf(mod) {
+  const candidate = mod?.default ?? mod
+  if (typeof candidate?.object !== 'function') {
+    throw new TypeError(`${SCHEMATERY} has no Schema.object export`)
+  }
+  return candidate
+}
+
+/** One-line reason for a thrown value, for the diagnostic below. */
+function reasonOf(error) {
+  return error?.message ?? String(error)
+}
+
+/**
+ * Load schemastery whichever way this entry was reached.
+ *
+ * Order matters: the plain specifier first (published installs and any copy
+ * that keeps a node_modules beside it), then the directories the running
+ * host is guaranteed to own — the active profile, the profile layout under
+ * DSH_HOME, the `dsh` entry process itself (DSH declares this library as its
+ * own dependency), and the process working directory. `link:` installs skip
+ * the first step because Node resolves the symlink to the real path before
+ * the specifier is looked up.
+ *
+ * @returns {Promise<import('@deepseek-ai/schemastery').Schema>} the host's schema library.
+ * @throws {Error} with every attempted base, when no base carries it.
+ */
+async function loadSchema() {
+  const failures = []
+  try {
+    return schemaOf(await import(SCHEMATERY))
+  } catch (error) {
+    failures.push(`bare import: ${reasonOf(error)}`)
+  }
+  const profileDir = process.env.DSH_PROFILE_DIR
+  const legacyProfileDir = process.env.DSH_HOME && process.env.DSH_PROFILE
+    ? path.join(process.env.DSH_HOME, 'profiles', process.env.DSH_PROFILE)
+    : undefined
+  const bases = [
+    profileDir && path.join(profileDir, 'index.js'),
+    legacyProfileDir && path.join(legacyProfileDir, 'index.js'),
+    process.argv[1],
+    path.join(process.cwd(), 'index.js'),
+  ].filter((base) => typeof base === 'string' && base.length > 0)
+  for (const base of bases) {
+    try {
+      const require = createRequire(base)
+      return schemaOf(await import(pathToFileURL(require.resolve(SCHEMATERY)).href))
+    } catch (error) {
+      failures.push(`${base}: ${reasonOf(error)}`)
+    }
+  }
+  const detail = `composer-keys: cannot resolve ${SCHEMATERY}; tried:\n  ${failures.join('\n  ')}`
+  // The Loader collapses a failed entry import to "failed to import", so this
+  // is the only place the reason reaches the terminal.
+  console.error(detail)
+  throw new Error(detail)
+}
+
+const Schema = await loadSchema()
 
 export const name = 'composer-keys'
 

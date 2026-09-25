@@ -1,4 +1,5 @@
-# Dependencies (tests are source-eval'd; the host resolves schemastery itself)
+# Dependencies (tests are source-eval'd; index.js resolves schemastery from
+# the host at load time, so a local install here stays optional)
 node_modules/
 
 # Local agent knowledge — deliberately NOT published (npm files whitelist

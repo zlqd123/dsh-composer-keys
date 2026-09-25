@@ -4,7 +4,9 @@
   <strong>把「发送 / 换行 / 打断」分配给你顺手的键 / Send, newline & interrupt — bound to the keys you like</strong>
 </p>
 
-> **v0.1.2 · 适配 DSH 0.1.7-rc.1**（同时通过双路径兼容 ≤0.1.6 的旧设置面）
+> **v0.1.3 · 适配 DSH 0.1.7-rc.1 / rc.2**（同时通过双路径兼容 ≤0.1.6 的旧设置面）
+
+> ⚠️ **维护状态 · Maintenance notice**：DSH 已有快捷键编辑界面（Settings → 快捷键）。若官方后续推出可自定义「发送 / 换行 / 打断」的同类功能，**本项目将停止维护**（归档，不再适配新版本 DSH）。
 
 `dsh-composer-keys` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 前端的输入框按键自定义插件：把 **Enter、Ctrl/Cmd+Enter、Shift+Enter 或任意自定义组合键**自由分配给「发送」「换行」「打断」三个动作，并提供可隔离切换的**键位方案**（预设）。
 
@@ -14,6 +16,7 @@
 
 | DSH 版本 | 状态 | 设置持久化通道 |
 | --- | --- | --- |
+| **0.1.7-rc.2** | ✅ 适配 | `configForms` + 条目 volatile `Config` 派生命名空间 |
 | **0.1.7-rc.1** | ✅ 适配（本版本主目标） | `configForms` + 条目 volatile `Config` 派生命名空间 |
 | ≤ 0.1.6 | ✅ 兼容（遗留路径） | `settingsScope.bind` / `settings.register` |
 
@@ -101,6 +104,8 @@ dsh plugin --profile web remove dsh-composer-keys
 ```
 
 地面真相文件（服务端实际值）：`~/.dsh/profiles/web/cordis.patch.yml` 中的 `- id: composer-keys` 条目；注册状态看同目录 `package.json`（dependency + `dsh.profile.bundles`）。若 `dsh plugin` 命令卡住，检查 `package.json.lock` 是否为**已死进程的残留锁**。
+
+启动时报 `composer-keys (dsh-composer-keys): failed to import`：宿主半件没能在装载时拿到 `@deepseek-ai/schemastery`（0.1.7-rc.2 起 Loader 只回显这一句，不带原因）。符号链接安装（`link:`）最容易触发——Node 会先把链接 realpath 回源码目录再解析裸依赖。`index.js` 已按 `DSH_PROFILE_DIR` → `DSH_HOME/profiles/<profile>` → `dsh` 入口进程 → `cwd` 的顺序兜底解析，全部失败时会把尝试过的路径直接打进终端；按打印的清单补齐依赖即可。
 
 ## 已知限制
 
