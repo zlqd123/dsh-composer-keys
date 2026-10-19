@@ -170,6 +170,14 @@ export const Config = Schema.object({
   interrupt: volatileField(Schema.array(Schema.string()).default([...DEFAULT_BINDINGS.interrupt])),
   presets: volatileField(Schema.array(CustomPresetSchema).default([])),
   builtinSchemes: volatileField(Schema.array(BuiltinSchemeSchema).default([])),
+  /**
+   * Request channel for the Plugins page's "新建方案" text field, never a
+   * stored preference: the browser half parses it back to unset in every
+   * staged save, so it serves only as a schema-valid path for the native
+   * form frame to carry the typed name into the same atomic mutate. Keep
+   * the field volatile — namespace describe otherwise skips it silently.
+   */
+  schemeName: volatileField(Schema.string().default('')),
 })
 
 /**
@@ -184,6 +192,8 @@ export const ComposerKeysSettingsSchema = Schema.object({
   interrupt: Schema.array(Schema.string()).default([...DEFAULT_BINDINGS.interrupt]),
   presets: Schema.array(CustomPresetSchema).default([]),
   builtinSchemes: Schema.array(BuiltinSchemeSchema).default([]),
+  /** Parity with Config: request channel for scheme creation (never stored). */
+  schemeName: Schema.string().default(''),
 })
 
 /**
